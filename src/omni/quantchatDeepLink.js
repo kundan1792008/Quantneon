@@ -1,10 +1,21 @@
 function scheduleNonBlocking(task) {
   if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => setTimeout(task, 0));
+    requestAnimationFrame(task);
     return;
   }
 
   setTimeout(task, 0);
+}
+
+function buildDeepLinkUrl({ baseUrl, source, roomId, avatarId }) {
+  const params = new URLSearchParams({
+    source,
+    room: roomId,
+    avatar: avatarId,
+    mode: 'silent'
+  });
+
+  return `${baseUrl}?${params.toString()}`;
 }
 
 export function createQuantchatDeepLink({
@@ -17,7 +28,7 @@ export function createQuantchatDeepLink({
         throw new Error('roomId and avatarId are required');
       }
 
-      const url = `${baseUrl}?source=${encodeURIComponent(source)}&room=${encodeURIComponent(roomId)}&avatar=${encodeURIComponent(avatarId)}&mode=silent`;
+      const url = buildDeepLinkUrl({ baseUrl, source, roomId, avatarId });
 
       scheduleNonBlocking(() => {
         transport(url);

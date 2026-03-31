@@ -5,7 +5,18 @@ const DEFAULT_LANES = Object.freeze([
   { x: 2.5, y: 0, z: 2.5 }
 ]);
 
-export function createLowLatencySpawner({ lanes = DEFAULT_LANES, now = () => performance.now() } = {}) {
+function getCrossEnvironmentTimestamp() {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+
+  return Date.now();
+}
+
+export function createLowLatencySpawner({
+  lanes = DEFAULT_LANES,
+  now = getCrossEnvironmentTimestamp
+} = {}) {
   let laneCursor = 0;
   const activePlayers = new Map();
 
