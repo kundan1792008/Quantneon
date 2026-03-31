@@ -1,0 +1,79 @@
+[gd_scene load_steps=7 format=3 uid="uid://vend_mach_01"]
+
+[ext_resource type="Script" path="res://scripts/vending_machine.gd" id="1_vend"]
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_body"]
+size = Vector3(1.2, 2.5, 1.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMat_machine"]
+albedo_color = Color(0.15, 0.15, 0.2, 1)
+metallic = 0.8
+roughness = 0.3
+
+[sub_resource type="StandardMaterial3D" id="StandardMat_screen"]
+albedo_color = Color(0, 1, 1, 1)
+emission_enabled = true
+emission = Color(0, 1, 1, 1)
+emission_energy_multiplier = 2.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_interact"]
+size = Vector3(3, 3, 3)
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_can"]
+top_radius = 0.1
+bottom_radius = 0.1
+height = 0.3
+
+[sub_resource type="StandardMaterial3D" id="StandardMat_can"]
+albedo_color = Color(1, 0, 0, 1)
+metallic = 0.9
+roughness = 0.2
+emission_enabled = true
+emission = Color(1, 0, 0, 1)
+emission_energy_multiplier = 0.5
+
+[node name="VendingMachine" type="StaticBody3D"]
+script = ExtResource("1_vend")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0)
+shape = SubResource("BoxShape3D_body")
+
+[node name="MachineMesh" type="CSGBox3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0)
+size = Vector3(1.2, 2.5, 1.2)
+material = SubResource("StandardMat_machine")
+
+[node name="Screen" type="CSGBox3D" parent="MachineMesh"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.4, 0.61)
+size = Vector3(0.9, 0.8, 0.05)
+material = SubResource("StandardMat_screen")
+
+[node name="DispenseSlot" type="CSGBox3D" parent="MachineMesh"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.8, 0.5)
+operation = 2
+size = Vector3(0.8, 0.4, 0.4)
+
+[node name="InteractArea" type="Area3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.25, 0)
+collision_layer = 8
+collision_mask = 2
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="InteractArea"]
+shape = SubResource("BoxShape3D_interact")
+
+[node name="PriceLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.8, 0)
+billboard = 1
+text = "NeonCola: 10 Bits
+[E] Buy"
+font_size = 48
+outline_render_priority = 0
+outline_modulate = Color(0, 0, 0, 1)
+visible = false
+
+[node name="CanMesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0.4)
+mesh = SubResource("CylinderMesh_can")
+surface_material_override/0 = SubResource("StandardMat_can")
+visible = false

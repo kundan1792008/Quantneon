@@ -1,0 +1,86 @@
+[gd_scene load_steps=4 format=3 uid="uid://c0mb4thud"]
+
+[ext_resource type="Script" path="res://scripts/combat_hud.gd" id="1_hud_script"]
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_hud"]
+bg_color = Color(0, 0, 0, 0.4)
+border_width_left = 2
+border_color = Color(0, 1, 1, 1)
+corner_radius_top_left = 5
+corner_radius_bottom_left = 5
+
+[node name="CombatHUD" type="CanvasLayer"]
+script = ExtResource("1_hud_script")
+
+[node name="Crosshair" type="Control" parent="."]
+layout_mode = 3
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="LineH" type="ColorRect" parent="Crosshair"]
+layout_mode = 0
+offset_left = -10.0
+offset_top = -1.0
+offset_right = 10.0
+offset_bottom = 1.0
+color = Color(0, 1, 1, 0.8)
+
+[node name="LineV" type="ColorRect" parent="Crosshair"]
+layout_mode = 0
+offset_left = -1.0
+offset_top = -10.0
+offset_right = 1.0
+offset_bottom = 10.0
+color = Color(0, 1, 1, 0.8)
+
+[node name="WeaponPanel" type="Panel" parent="."]
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -220.0
+offset_top = -80.0
+offset_right = -20.0
+offset_bottom = -20.0
+grow_horizontal = 0
+grow_vertical = 0
+theme_override_styles/panel = SubResource("StyleBoxFlat_hud")
+
+[node name="VBox" type="VBoxContainer" parent="WeaponPanel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+alignment = 1
+
+[node name="WeaponName" type="Label" parent="WeaponPanel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0, 1, 1, 1)
+theme_override_font_sizes/font_size = 18
+text = "LASER PISTOL"
+horizontal_alignment = 2
+
+[node name="AmmoContainer" type="HBoxContainer" parent="WeaponPanel/VBox"]
+layout_mode = 2
+alignment = 2
+
+[node name="AmmoCount" type="Label" parent="WeaponPanel/VBox/AmmoContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 24
+text = "20"
+
+[node name="Separator" type="Label" parent="WeaponPanel/VBox/AmmoContainer"]
+layout_mode = 2
+text = " / "
+
+[node name="MaxAmmo" type="Label" parent="WeaponPanel/VBox/AmmoContainer"]
+layout_mode = 2
+text = "20"

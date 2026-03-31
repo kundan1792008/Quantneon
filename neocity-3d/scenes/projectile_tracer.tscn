@@ -1,0 +1,21 @@
+[gd_scene load_steps=4 format=3 uid="uid://wpn_tracer_74"]
+
+[ext_resource type="Script" path="res://scripts/projectile_tracer.gd" id="1_tracer"]
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_tracer"]
+radius = 0.05
+height = 1.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_tracer"]
+albedo_color = Color(1, 0.8, 0, 1)
+emission_enabled = true
+emission = Color(1, 0.8, 0, 1)
+emission_energy_multiplier = 4.0
+
+[node name="ProjectileTracer" type="Node3D"]
+script = ExtResource("1_tracer")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, -4.37114e-08, -1, 0, 1, -4.37114e-08, 0, 0, 0)
+mesh = SubResource("CapsuleMesh_tracer")
+surface_material_override/0 = SubResource("StandardMaterial3D_tracer")

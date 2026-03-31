@@ -1,0 +1,106 @@
+[gd_scene load_steps=8 format=3 uid="uid://hbk_78_neo"]
+
+[ext_resource type="Script" path="res://scripts/hover_bike.gd" id="1_hbike"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_body"]
+albedo_color = Color(0.05, 0.05, 0.15, 1)
+metallic = 0.9
+roughness = 0.1
+emission_enabled = true
+emission = Color(0, 0.8, 1, 1)
+emission_energy_multiplier = 1.5
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_accent"]
+albedo_color = Color(0, 1, 1, 1)
+emission_enabled = true
+emission = Color(0, 1, 1, 1)
+emission_energy_multiplier = 3.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_engine"]
+albedo_color = Color(1, 0.3, 0, 1)
+emission_enabled = true
+emission = Color(1, 0.5, 0, 1)
+emission_energy_multiplier = 4.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_body"]
+size = Vector3(1.2, 0.8, 3.0)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_mount"]
+size = Vector3(4, 3, 5)
+
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_seat"]
+radius = 0.25
+height = 0.6
+
+[node name="HoverBike" type="CharacterBody3D"]
+script = ExtResource("1_hbike")
+collision_layer = 8
+collision_mask = 1
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("BoxShape3D_body")
+
+[node name="BikeModel" type="Node3D" parent="."]
+
+; Main body - sleek elongated shape
+[node name="Body" type="CSGBox3D" parent="BikeModel"]
+size = Vector3(0.8, 0.4, 2.5)
+material = SubResource("StandardMaterial3D_body")
+
+; Front fairing
+[node name="Fairing" type="CSGBox3D" parent="BikeModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.15, -1.0)
+size = Vector3(0.6, 0.6, 1.2)
+material = SubResource("StandardMaterial3D_body")
+
+; Neon accent strips (sides)
+[node name="AccentL" type="CSGBox3D" parent="BikeModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.42, 0, 0)
+size = Vector3(0.04, 0.15, 2.5)
+material = SubResource("StandardMaterial3D_accent")
+
+[node name="AccentR" type="CSGBox3D" parent="BikeModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.42, 0, 0)
+size = Vector3(0.04, 0.15, 2.5)
+material = SubResource("StandardMaterial3D_accent")
+
+; Seat
+[node name="Seat" type="MeshInstance3D" parent="BikeModel"]
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 0, 0.45, 0.3)
+mesh = SubResource("CapsuleMesh_seat")
+surface_material_override/0 = SubResource("StandardMaterial3D_body")
+
+; Rear engine glow
+[node name="EngineGlow" type="CSGBox3D" parent="BikeModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 1.35)
+size = Vector3(0.5, 0.25, 0.3)
+material = SubResource("StandardMaterial3D_engine")
+
+; Hover pads (bottom glow)
+[node name="HoverPadF" type="CSGBox3D" parent="BikeModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, -0.8)
+size = Vector3(0.6, 0.05, 0.4)
+material = SubResource("StandardMaterial3D_accent")
+
+[node name="HoverPadR" type="CSGBox3D" parent="BikeModel"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, 0.8)
+size = Vector3(0.6, 0.05, 0.4)
+material = SubResource("StandardMaterial3D_accent")
+
+; Mount interaction area
+[node name="MountArea" type="Area3D" parent="."]
+collision_layer = 0
+collision_mask = 2
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="MountArea"]
+shape = SubResource("BoxShape3D_mount")
+
+; Mount label
+[node name="MountLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
+billboard = 1
+text = "[E] Mount Hover Bike"
+font_size = 32
+modulate = Color(0, 1, 1, 1)
+outline_size = 8
+visible = false

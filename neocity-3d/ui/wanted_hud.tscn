@@ -1,0 +1,73 @@
+[gd_scene load_steps=3 format=3 uid="uid://c0wantedhud"]
+
+[ext_resource type="Script" path="res://scripts/wanted_hud.gd" id="1_wanted_script"]
+
+[node name="WantedHUD" type="CanvasLayer"]
+script = ExtResource("1_wanted_script")
+
+[node name="MainContainer" type="Control" parent="."]
+layout_mode = 3
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -300.0
+offset_bottom = 100.0
+grow_horizontal = 0
+
+[node name="StarsContainer" type="HBoxContainer" parent="MainContainer"]
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -250.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = 60.0
+grow_horizontal = 0
+alignment = 2
+
+[node name="Star1" type="Label" parent="MainContainer/StarsContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.3, 0.3, 0.3, 1)
+theme_override_font_sizes/font_size = 32
+text = "★"
+
+[node name="Star2" type="Label" parent="MainContainer/StarsContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.3, 0.3, 0.3, 1)
+theme_override_font_sizes/font_size = 32
+text = "★"
+
+[node name="Star3" type="Label" parent="MainContainer/StarsContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.3, 0.3, 0.3, 1)
+theme_override_font_sizes/font_size = 32
+text = "★"
+
+[node name="Star4" type="Label" parent="MainContainer/StarsContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.3, 0.3, 0.3, 1)
+theme_override_font_sizes/font_size = 32
+text = "★"
+
+[node name="Star5" type="Label" parent="MainContainer/StarsContainer"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.3, 0.3, 0.3, 1)
+theme_override_font_sizes/font_size = 32
+text = "★"
+
+[node name="StatusLabel" type="Label" parent="MainContainer"]
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -200.0
+offset_top = 60.0
+offset_right = -20.0
+offset_bottom = 85.0
+grow_horizontal = 0
+theme_override_colors/font_color = Color(1, 0, 0, 1)
+theme_override_font_sizes/font_size = 14
+text = "WANTED"
+horizontal_alignment = 2
+visible = false

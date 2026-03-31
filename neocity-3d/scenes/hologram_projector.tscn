@@ -1,0 +1,40 @@
+[gd_scene load_steps=5 format=3 uid="uid://holoPr_0j3c7"]
+
+[ext_resource type="Script" path="res://scripts/hologram_projector.gd" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_base"]
+albedo_color = Color(0.1, 0.1, 0.15, 1)
+metallic = 0.8
+roughness = 0.4
+
+[sub_resource type="TorusMesh" id="TorusMesh_holo"]
+inner_radius = 1.0
+outer_radius = 1.4
+rings = 32
+tube_segments = 16
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_holo"]
+transparency = 1
+blend_mode = 1
+cull_mode = 2
+shading_mode = 0
+albedo_color = Color(0, 1, 1, 0.6)
+emission_enabled = true
+emission = Color(0, 1, 1, 1)
+emission_energy_multiplier = 3.0
+disable_receive_shadows = true
+
+[node name="HologramProjector" type="Node3D"]
+script = ExtResource("1_script")
+
+[node name="BaseDisc" type="CSGCylinder3D" parent="."]
+use_collision = true
+radius = 1.5
+height = 0.2
+material = SubResource("StandardMaterial3D_base")
+
+[node name="HoloMesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.5, 0)
+cast_shadow = 0
+mesh = SubResource("TorusMesh_holo")
+surface_material_override/0 = SubResource("StandardMaterial3D_holo")

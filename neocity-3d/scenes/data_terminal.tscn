@@ -1,0 +1,49 @@
+[gd_scene load_steps=5 format=3 uid="uid://hackterm12345"]
+
+[ext_resource type="Script" path="res://scripts/data_terminal.gd" id="1_term1"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_Terminal"]
+size = Vector3(1, 2, 1)
+
+[sub_resource type="StandardMaterial3D" id="Mat_Terminal"]
+albedo_color = Color(0.1, 0.4, 0.1, 1)
+metallic = 0.8
+roughness = 0.2
+emission_enabled = true
+emission = Color(0, 1, 0, 1)
+emission_energy_multiplier = 0.5
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_TermInt"]
+size = Vector3(1, 2, 1)
+
+[node name="DataTerminal" type="Node3D"]
+script = ExtResource("1_term1")
+
+[node name="TerminalMesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+mesh = SubResource("BoxMesh_Terminal")
+surface_material_override/0 = SubResource("Mat_Terminal")
+
+[node name="StatusLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.5, 0)
+billboard = 1
+no_depth_test = true
+text = "DATA TERMINAL [ONLINE]"
+font_size = 32
+modulate = Color(0, 1, 0, 1)
+
+[node name="DefenseLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.2, 0)
+billboard = 1
+no_depth_test = true
+text = "ICE: ???"
+font_size = 24
+modulate = Color(1, 0.5, 0, 1)
+
+[node name="InteractionArea" type="Area3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)
+collision_layer = 2
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="InteractionArea"]
+shape = SubResource("BoxShape3D_TermInt")

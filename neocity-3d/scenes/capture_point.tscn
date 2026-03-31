@@ -1,0 +1,46 @@
+[gd_scene load_steps=5 format=3 uid="uid://cap_point_7i5f0"]
+
+[ext_resource type="Script" path="res://scripts/capture_point.gd" id="1_cp1"]
+[ext_resource type="Material" path="res://materials/hologram.tres" id="2_holo"]
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_holo"]
+top_radius = 5.0
+bottom_radius = 5.0
+height = 20.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_base"]
+albedo_color = Color(0.1, 0.1, 0.1, 1)
+metallic = 0.8
+roughness = 0.2
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_base"]
+top_radius = 5.5
+bottom_radius = 5.5
+height = 1.0
+
+[node name="CapturePoint" type="Node3D"]
+script = ExtResource("1_cp1")
+
+[node name="BaseMesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
+mesh = SubResource("CylinderMesh_base")
+surface_material_override/0 = SubResource("StandardMaterial3D_base")
+
+[node name="HoloMesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 10, 0)
+mesh = SubResource("CylinderMesh_holo")
+surface_material_override/0 = ExtResource("2_holo")
+
+[node name="FactionLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 22, 0)
+billboard = 1
+text = "COMMAND POST"
+font_size = 64
+
+[node name="ProgressLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 20.5, 0)
+billboard = 1
+text = "0% [NONE]"
+font_size = 48
+outline_render_priority = 0
+outline_modulate = Color(0, 0, 0, 1)

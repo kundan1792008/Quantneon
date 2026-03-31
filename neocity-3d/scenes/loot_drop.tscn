@@ -1,0 +1,44 @@
+[gd_scene load_steps=5 format=3 uid="uid://cx1n2o3p4q5r6"]
+
+[ext_resource type="Script" path="res://scripts/loot_drop.gd" id="1_loot_script"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_loot"]
+size = Vector3(0.4, 0.4, 0.4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_loot"]
+albedo_color = Color(0, 1, 0.5, 1)
+emission_enabled = true
+emission = Color(0, 1, 0.5, 1)
+emission_energy_multiplier = 2.0
+
+[sub_resource type="CylinderShape3D" id="CylinderShape3D_interact"]
+radius = 1.0
+height = 1.5
+
+[node name="LootDrop" type="Node3D"]
+script = ExtResource("1_loot_script")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
+mesh = SubResource("BoxMesh_loot")
+surface_material_override/0 = SubResource("StandardMaterial3D_loot")
+
+[node name="OmniLight3D" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
+light_color = Color(0, 1, 0.5, 1)
+light_energy = 2.0
+omni_range = 3.0
+
+[node name="Area3D" type="Area3D" parent="."]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Area3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0)
+shape = SubResource("CylinderShape3D_interact")
+
+[node name="Label3D" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 0)
+pixel_size = 0.01
+billboard = 1
+text = "ITEM"
+font_size = 32
+outline_size = 8

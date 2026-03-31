@@ -1,0 +1,622 @@
+[gd_scene load_steps=19 format=3 uid="uid://c8k2k0k2k0k2k"]
+
+[ext_resource type="PackedScene" uid="uid://b8j2j0j2j0j2j" path="res://scenes/player.tscn" id="1_player"]
+[ext_resource type="PackedScene" uid="uid://d8m2m0m2m0m2m" path="res://scenes/npc.tscn" id="2_npc"]
+[ext_resource type="PackedScene" uid="uid://f8g2g0g2g0g2g" path="res://scenes/vehicle.tscn" id="3_vehicle"]
+[ext_resource type="PackedScene" uid="uid://dchg_ui_75" path="res://scenes/drone_chat_ui.tscn" id="4_dronechat"]
+[ext_resource type="Script" path="res://scripts/zipline_spawner.gd" id="5_zipspawn"]
+[ext_resource type="PackedScene" path="res://scenes/neon_billboard.tscn" id="6_billboard"]
+[ext_resource type="PackedScene" path="res://scenes/hover_bike.tscn" id="7_hbike"]
+[ext_resource type="PackedScene" path="res://scenes/street_light.tscn" id="8_streetlight"]
+[ext_resource type="PackedScene" path="res://scenes/subway_station.tscn" id="9_subway"]
+[ext_resource type="Script" path="res://scripts/city_ambience.gd" id="10_ambience"]
+[ext_resource type="PackedScene" path="res://scenes/graffiti_wall.tscn" id="11_graffiti"]
+[ext_resource type="PackedScene" path="res://scenes/vending_machine.tscn" id="12_vending"]
+[ext_resource type="PackedScene" path="res://scenes/security_camera.tscn" id="13_camera"]
+[ext_resource type="PackedScene" path="res://scenes/hologram_projector.tscn" id="14_hologram"]
+[ext_resource type="PackedScene" uid="uid://prk0rng0rng0s" path="res://scenes/parkour_ring.tscn" id="time_trial_ring"]
+[ext_resource type="Script" path="res://scripts/time_trial.gd" id="time_trial_script"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1"]
+sky_top_color = Color(0.1, 0.05, 0.2, 1)
+sky_horizon_color = Color(0.3, 0.1, 0.4, 1)
+ground_bottom_color = Color(0.05, 0.02, 0.1, 1)
+
+[sub_resource type="Sky" id="Sky_1"]
+sky_material = SubResource("ProceduralSkyMaterial_1")
+
+[sub_resource type="Environment" id="Environment_1"]
+background_mode = 2
+sky = SubResource("Sky_1")
+tonemap_mode = 2
+tonemap_exposure = 1.1
+tonemap_white = 1.5
+glow_enabled = true
+glow_levels/1 = 1.0
+glow_levels/2 = 1.0
+glow_levels/3 = 1.0
+glow_levels/5 = 0.0
+glow_intensity = 1.5
+glow_strength = 1.2
+glow_bloom = 0.15
+glow_blend_mode = 1
+glow_hdr_threshold = 1.0
+volumetric_fog_enabled = true
+volumetric_fog_density = 0.025
+volumetric_fog_albedo = Color(0.25098, 0.109804, 0.407843, 1)
+volumetric_fog_emission = Color(0.0588235, 0, 0.168627, 1)
+volumetric_fog_emission_energy = 2.0
+volumetric_fog_length = 150.0
+volumetric_fog_ambient_inject = 1.0
+ssr_enabled = true
+ssr_max_steps = 32
+ssr_fade_in = 0.15
+ssr_fade_out = 2.0
+ssao_enabled = true
+ssao_radius = 2.0
+ssao_intensity = 3.0
+ssil_enabled = true
+
+[sub_resource type="Shader" id="Shader_Floor"]
+code = "shader_type spatial;
+render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
+
+uniform vec4 base_albedo : source_color = vec4(0.04, 0.04, 0.06, 1.0);
+uniform vec4 grid_color : source_color = vec4(0.0, 1.0, 1.0, 1.0);
+uniform float grid_spacing = 4.0;
+uniform float grid_thickness = 0.05;
+uniform float emission_energy = 5.0;
+uniform float puddle_scale = 0.5;
+uniform float puddle_threshold = 0.45;
+
+vec2 random2(vec2 st){
+    st = vec2(dot(st,vec2(127.1,311.7)), dot(st,vec2(269.5,183.3)));
+    return -1.0 + 2.0*fract(sin(st)*43758.5453123);
+}
+
+float noise(vec2 st) {
+    vec2 i = floor(st);
+    vec2 f = fract(st);
+    vec2 u = f*f*(3.0-2.0*f);
+    return mix(mix(dot(random2(i+vec2(0.0,0.0)), f-vec2(0.0,0.0)),
+                   dot(random2(i+vec2(1.0,0.0)), f-vec2(1.0,0.0)), u.x),
+               mix(dot(random2(i+vec2(0.0,1.0)), f-vec2(0.0,1.0)),
+                   dot(random2(i+vec2(1.0,1.0)), f-vec2(1.0,1.0)), u.x), u.y);
+}
+
+void fragment() {
+    vec3 world_pos = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
+    vec2 uv = world_pos.xz;
+    vec2 grid_uv = fract(uv / grid_spacing);
+    float grid_line = step(grid_uv.x, grid_thickness) + step(grid_uv.y, grid_thickness);
+    grid_line = clamp(grid_line, 0.0, 1.0);
+    
+    float n = noise(uv * puddle_scale) * 0.5 + 0.5;
+    float puddle = smoothstep(puddle_threshold - 0.1, puddle_threshold + 0.1, n);
+    
+    ALBEDO = mix(base_albedo.rgb, grid_color.rgb, grid_line);
+    METALLIC = mix(0.1, 0.98, puddle);
+    ROUGHNESS = mix(0.9, 0.02, puddle);
+    EMISSION = grid_color.rgb * grid_line * emission_energy;
+}
+"
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_floor"]
+albedo_color = Color(0.02, 0.02, 0.05, 1)
+metallic = 1.0
+roughness = 0.05
+emission_enabled = true
+emission = Color(0, 0.2, 0.3, 1)
+emission_energy_multiplier = 0.5
+
+[sub_resource type="Shader" id="Shader_Building"]
+code = "shader_type spatial;
+render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
+
+uniform vec4 base_color : source_color = vec4(0.02, 0.02, 0.04, 1.0);
+uniform vec4 edge_color : source_color = vec4(1.0, 0.0, 0.8, 1.0);
+uniform float grid_size = 2.0;
+uniform float edge_thickness = 0.08;
+uniform float emission_str = 8.0;
+
+void fragment() {
+    vec3 world_pos = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
+    vec3 abs_norm = abs(NORMAL);
+    vec2 grid_uv = vec2(0.0);
+    
+    if (abs_norm.x > 0.5) grid_uv = world_pos.zy;
+    else if (abs_norm.z > 0.5) grid_uv = world_pos.xy;
+    else grid_uv = world_pos.xz;
+    
+    vec2 local_uv = fract(grid_uv / grid_size);
+    
+    float edge_x = step(local_uv.x, edge_thickness) + step(1.0 - edge_thickness, local_uv.x);
+    float edge_y = step(local_uv.y, edge_thickness) + step(1.0 - edge_thickness, local_uv.y);
+    float edge = clamp(edge_x + edge_y, 0.0, 1.0);
+    
+    ALBEDO = mix(base_color.rgb, edge_color.rgb, edge);
+    METALLIC = 0.8;
+    ROUGHNESS = 0.2;
+    EMISSION = edge_color.rgb * edge * emission_str;
+}
+"
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_building"]
+albedo_color = Color(0.02, 0.02, 0.05, 1)
+metallic = 0.8
+roughness = 0.2
+emission_enabled = true
+emission = Color(0, 1, 1, 1)
+emission_energy_multiplier = 2.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_rooftop"]
+albedo_color = Color(0.02, 0.02, 0.05, 1)
+metallic = 0.8
+roughness = 0.2
+emission_enabled = true
+emission = Color(1, 0, 1, 1)
+emission_energy_multiplier = 2.0
+
+[node name="Main" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_1")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-0.866025, -0.433013, 0.25, 0, 0.5, 0.866025, -0.5, 0.75, -0.433013, 0, 0, 0)
+shadow_enabled = true
+
+[node name="Floor" type="CSGBox3D" parent="."]
+use_collision = true
+size = Vector3(200, 1, 200)
+material = SubResource("StandardMaterial3D_floor")
+
+[node name="Buildings" type="Node3D" parent="."]
+
+; ===== TOWER 1 =====
+[node name="Tower1" type="CSGBox3D" parent="Buildings"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 15, 10, 15)
+use_collision = true
+size = Vector3(10, 20, 10)
+material = SubResource("StandardMaterial3D_building")
+
+[node name="RooftopPad" type="CSGBox3D" parent="Buildings/Tower1"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 10.5, 0)
+use_collision = true
+size = Vector3(12, 0.3, 12)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_N" type="CSGBox3D" parent="Buildings/Tower1/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -6)
+use_collision = true
+size = Vector3(12, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_S" type="CSGBox3D" parent="Buildings/Tower1/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 6)
+use_collision = true
+size = Vector3(12, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_E" type="CSGBox3D" parent="Buildings/Tower1/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 12)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_W" type="CSGBox3D" parent="Buildings/Tower1/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 12)
+material = SubResource("StandardMaterial3D_rooftop")
+
+; ===== TOWER 2 =====
+[node name="Tower2" type="CSGBox3D" parent="Buildings"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 35, 15, 35)
+use_collision = true
+size = Vector3(15, 30, 15)
+material = SubResource("StandardMaterial3D_building")
+
+[node name="ElevatorShaft" type="CSGBox3D" parent="Buildings/Tower2"]
+operation = 2
+size = Vector3(6.5, 30, 6.5)
+
+[node name="RooftopPad" type="CSGBox3D" parent="Buildings/Tower2"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 15.5, 0)
+use_collision = true
+size = Vector3(17, 0.3, 17)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_N" type="CSGBox3D" parent="Buildings/Tower2/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -8.5)
+use_collision = true
+size = Vector3(17, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_S" type="CSGBox3D" parent="Buildings/Tower2/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 8.5)
+use_collision = true
+size = Vector3(17, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_E" type="CSGBox3D" parent="Buildings/Tower2/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8.5, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 17)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_W" type="CSGBox3D" parent="Buildings/Tower2/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8.5, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 17)
+material = SubResource("StandardMaterial3D_rooftop")
+
+; ===== TOWER 3 (NEW) =====
+[node name="Tower3" type="CSGBox3D" parent="Buildings"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -25, 12, -20)
+use_collision = true
+size = Vector3(12, 24, 12)
+material = SubResource("StandardMaterial3D_building")
+
+[node name="RooftopPad" type="CSGBox3D" parent="Buildings/Tower3"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 12.5, 0)
+use_collision = true
+size = Vector3(14, 0.3, 14)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_N" type="CSGBox3D" parent="Buildings/Tower3/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -7)
+use_collision = true
+size = Vector3(14, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_S" type="CSGBox3D" parent="Buildings/Tower3/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 7)
+use_collision = true
+size = Vector3(14, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_E" type="CSGBox3D" parent="Buildings/Tower3/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 14)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_W" type="CSGBox3D" parent="Buildings/Tower3/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 14)
+material = SubResource("StandardMaterial3D_rooftop")
+
+; ===== TOWER 4 (NEW) =====
+[node name="Tower4" type="CSGBox3D" parent="Buildings"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -30, 20, 30)
+use_collision = true
+size = Vector3(8, 40, 8)
+material = SubResource("StandardMaterial3D_building")
+
+[node name="RooftopPad" type="CSGBox3D" parent="Buildings/Tower4"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 20.5, 0)
+use_collision = true
+size = Vector3(10, 0.3, 10)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_N" type="CSGBox3D" parent="Buildings/Tower4/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -5)
+use_collision = true
+size = Vector3(10, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_S" type="CSGBox3D" parent="Buildings/Tower4/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 5)
+use_collision = true
+size = Vector3(10, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_E" type="CSGBox3D" parent="Buildings/Tower4/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 10)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_W" type="CSGBox3D" parent="Buildings/Tower4/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 10)
+material = SubResource("StandardMaterial3D_rooftop")
+
+; ===== SKYSCRAPER 1 (NEW) =====
+[node name="Skyscraper1" type="CSGBox3D" parent="Buildings"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 60, 25, -15)
+use_collision = true
+size = Vector3(18, 50, 18)
+material = SubResource("StandardMaterial3D_building")
+
+[node name="RooftopPad" type="CSGBox3D" parent="Buildings/Skyscraper1"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 25.5, 0)
+use_collision = true
+size = Vector3(20, 0.3, 20)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_N" type="CSGBox3D" parent="Buildings/Skyscraper1/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -10)
+use_collision = true
+size = Vector3(20, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_S" type="CSGBox3D" parent="Buildings/Skyscraper1/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 10)
+use_collision = true
+size = Vector3(20, 2, 0.2)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_E" type="CSGBox3D" parent="Buildings/Skyscraper1/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 20)
+material = SubResource("StandardMaterial3D_rooftop")
+
+[node name="Rail_W" type="CSGBox3D" parent="Buildings/Skyscraper1/RooftopPad"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10, 1, 0)
+use_collision = true
+size = Vector3(0.2, 2, 20)
+material = SubResource("StandardMaterial3D_rooftop")
+
+; ===== NEON BILLBOARDS =====
+[node name="Billboard1" parent="Buildings/Tower1" instance=ExtResource("6_billboard")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5.2, 5, 0)
+
+[node name="Billboard2" parent="Buildings/Tower2" instance=ExtResource("6_billboard")]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 0, 8, 7.7)
+
+[node name="Billboard3" parent="Buildings/Tower3" instance=ExtResource("6_billboard")]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 6, -6.2)
+
+[node name="Billboard4" parent="Buildings/Tower4" instance=ExtResource("6_billboard")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.2, 12, 0)
+
+[node name="Billboard5" parent="Buildings/Skyscraper1" instance=ExtResource("6_billboard")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 9.2, 15, 0)
+
+[node name="Billboard6" parent="Buildings/Skyscraper1" instance=ExtResource("6_billboard")]
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 0, 25, -9.2)
+
+[node name="SecurityCamera_T4" parent="Buildings/Tower4" instance=ExtResource("13_camera")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 15, 4.5)
+
+[node name="SecurityCamera_SK1" parent="Buildings/Skyscraper1" instance=ExtResource("13_camera")]
+transform = Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, 9.5, 20, 0)
+
+[node name="Player" parent="." instance=ExtResource("1_player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+
+[node name="NPC1" parent="." instance=ExtResource("2_npc")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 1, -5)
+
+[node name="NPC2" parent="." instance=ExtResource("2_npc")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 1, 12)
+
+[node name="NPC3" parent="." instance=ExtResource("2_npc")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 20, 1, 5)
+
+; ===== ROOFTOP NPCs =====
+; Tower2 rooftop vendor
+[node name="RooftopNPC1" parent="." instance=ExtResource("2_npc")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 33, 31, 33)
+
+; Tower3 rooftop guard
+[node name="RooftopNPC2" parent="." instance=ExtResource("2_npc")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -23, 25, -18)
+
+; Tower4 rooftop lookout
+[node name="RooftopNPC3" parent="." instance=ExtResource("2_npc")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -29, 41, 29)
+
+; Skyscraper1 penthouse NPC
+[node name="RooftopNPC4" parent="." instance=ExtResource("2_npc")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 58, 51, -13)
+
+[node name="NeoCar" parent="." instance=ExtResource("3_vehicle")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, 2, 5)
+collision_layer = 8
+
+; ===== HOVER BIKES =====
+[node name="HoverBike1" parent="." instance=ExtResource("7_hbike")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -10, 2, 8)
+
+[node name="HoverBike2" parent="." instance=ExtResource("7_hbike")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 45, 2, -5)
+
+; ===== STREET LIGHTS =====
+[node name="Light1" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 0.5, 0)
+
+[node name="Light2" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5, 0.5, 15)
+
+[node name="Light3" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 25, 0.5, 10)
+
+[node name="Light4" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 25, 0.5, -15)
+
+[node name="Light5" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -20, 0.5, -10)
+
+[node name="Light6" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -15, 0.5, 25)
+
+[node name="Light7" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 45, 0.5, 20)
+
+[node name="Light8" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 50, 0.5, -25)
+
+[node name="Light9" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -35, 0.5, 15)
+
+[node name="Light10" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, -25)
+
+[node name="Light11" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 65, 0.5, 10)
+
+[node name="Light12" parent="." instance=ExtResource("8_streetlight")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -40, 0.5, -30)
+
+; ===== SUBWAY STATIONS =====
+[node name="SubwayDowntown" parent="." instance=ExtResource("9_subway")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 10)
+
+[node name="SubwayIndustrial" parent="." instance=ExtResource("9_subway")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -25, 0.5, -30)
+
+; ===== VENDING MACHINES =====
+[node name="VendingMachine1" parent="." instance=ExtResource("12_vending")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 0, 12)
+
+[node name="VendingMachine2" parent="." instance=ExtResource("12_vending")]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, -23, 0, -28)
+
+[node name="VendingMachine3" parent="." instance=ExtResource("12_vending")]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 35, 0, 42)
+
+[node name="VendingMachine4" parent="." instance=ExtResource("12_vending")]
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 60, 0, -5)
+
+[node name="VendingMachine5" parent="." instance=ExtResource("12_vending")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -25, 0, 35)
+
+[node name="VendingMachine6" parent="." instance=ExtResource("12_vending")]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 12, 0, -15)
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="DroneChatBox" parent="HUD" instance=ExtResource("4_dronechat")]
+
+; ===== CITY AMBIENCE =====
+[node name="CityAmbience" type="Node" parent="."]
+script = ExtResource("10_ambience")
+
+; ===== HOLOGRAM PROJECTORS =====
+[node name="Holograms" type="Node3D" parent="."]
+
+; Tower 2 (Huge Magenta)
+[node name="Holo_Tower2" parent="Holograms" instance=ExtResource("14_hologram")]
+transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 35, 35, 35)
+holo_color = Color(1, 0, 1, 1)
+
+; Skyscraper 1 (Huge Cyan)
+[node name="Holo_Skyscap1" parent="Holograms" instance=ExtResource("14_hologram")]
+transform = Transform3D(5, 0, 0, 0, 5, 0, 0, 0, 5, 60, 55, -15)
+holo_color = Color(0, 1, 1, 1)
+
+; Tower 4 (Large Cyan)
+[node name="Holo_Tower4" parent="Holograms" instance=ExtResource("14_hologram")]
+transform = Transform3D(3, 0, 0, 0, 3, 0, 0, 0, 3, -30, 45, 30)
+
+; Subway Downtown (Small Magenta)
+[node name="Holo_SubwayDT" parent="Holograms" instance=ExtResource("14_hologram")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 10)
+holo_color = Color(1, 0, 1, 1)
+
+; Subway Industrial (Small Cyan)
+[node name="Holo_SubwayInd" parent="Holograms" instance=ExtResource("14_hologram")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -25, 4, -30)
+
+; Street Level HoverBike (Medium Cyan)
+[node name="Holo_Street1" parent="Holograms" instance=ExtResource("14_hologram")]
+transform = Transform3D(1.5, 0, 0, 0, 1.5, 0, 0, 0, 1.5, -10, 2, 8)
+
+; Street Level Light3 (Medium Magenta)
+[node name="Holo_Street2" parent="Holograms" instance=ExtResource("14_hologram")]
+transform = Transform3D(1.5, 0, 0, 0, 1.5, 0, 0, 0, 1.5, 25, 2, 10)
+holo_color = Color(1, 0.2, 0.8, 1)
+
+; ===== ZIPLINE ANCHORS =====
+[node name="ZipAnchor_T2_T3" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 35, 30.5, 35)
+
+[node name="ZipAnchor_T3_T2" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -25, 24.5, -20)
+
+[node name="ZipAnchor_T1_T4" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 15, 20.5, 15)
+
+[node name="ZipAnchor_T4_T1" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -30, 40.5, 30)
+
+[node name="ZipAnchor_T2_SK1" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 35, 30.5, 35)
+
+[node name="ZipAnchor_SK1_T2" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 60, 50.5, -15)
+
+[node name="ZipAnchor_T3_SK1" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -25, 24.5, -20)
+
+[node name="ZipAnchor_SK1_T3" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 60, 50.5, -15)
+
+; ===== GRAFFITI WALLS =====
+[node name="GraffitiWall1" parent="." instance=ExtResource("11_graffiti")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 35, 2, 27)
+wall_id = "wall_tower2_back"
+
+[node name="GraffitiWall2" parent="." instance=ExtResource("11_graffiti")]
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 4, 0.5, 12)
+wall_id = "wall_subway_downtown"
+
+[node name="GraffitiWall3" parent="." instance=ExtResource("11_graffiti")]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, -25, 0.5, -34)
+wall_id = "wall_subway_industrial"
+
+[node name="GraffitiWall4" parent="." instance=ExtResource("11_graffiti")]
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 20, 1, 15)
+wall_id = "wall_tower1_alley"
+
+[node name="ZiplineSpawner" type="Node3D" parent="."]
+script = ExtResource("5_zipspawn")
+
+; ===== PARKOUR TIME TRIAL =====
+[node name="TimeTrialCourse" type="Node3D" parent="."]
+script = ExtResource("time_trial_script")
+
+[node name="Ring0" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 35, 2, 45)
+ring_index = 0
+
+[node name="Ring1" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 35, 2, 35)
+ring_index = 1
+
+[node name="Ring2" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 35, 15, 35)
+ring_index = 2
+
+[node name="Ring3" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 35, 31, 35)
+ring_index = 3
+
+[node name="Ring4" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(0.707106, 0.707106, 0, -0.707106, 0.707106, 0, 0, 0, 1, 35, 33, 35)
+ring_index = 4
+
+[node name="Ring5" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(0.707106, 0.707106, 0, -0.707106, 0.707106, 0, 0, 0, 1, 47.5, 40.5, 10)
+ring_index = 5
+
+[node name="Ring6" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(0.707106, 0.707106, 0, -0.707106, 0.707106, 0, 0, 0, 1, 55, 48, -5)
+ring_index = 6
+
+[node name="Ring7" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 60, 51.5, -15)
+ring_index = 7
+
+[node name="Ring8" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 60, 25, -2)
+ring_index = 8
+
+[node name="Ring9" parent="TimeTrialCourse" instance=ExtResource("time_trial_ring")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 60, 2, 0)
+ring_index = 9

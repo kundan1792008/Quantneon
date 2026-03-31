@@ -1,0 +1,82 @@
+[gd_scene load_steps=2 format=3 uid="uid://clan_menu_123"]
+
+[ext_resource type="Script" path="res://scripts/clan_menu.gd" id="1_script"]
+
+[node name="ClanMenu" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_script")
+
+[node name="Panel" type="Panel" parent="."]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -250.0
+offset_top = -300.0
+offset_right = 250.0
+offset_bottom = 300.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBoxContainer" type="VBoxContainer" parent="Panel"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 10.0
+offset_top = 10.0
+offset_right = -10.0
+offset_bottom = -10.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Header" type="HBoxContainer" parent="Panel/VBoxContainer"]
+layout_mode = 2
+
+[node name="ClanTag" type="Label" parent="Panel/VBoxContainer/Header"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0, 1, 1, 1)
+text = "[CLAN]"
+
+[node name="ClanName" type="Label" parent="Panel/VBoxContainer/Header"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "The Syndicate Elite"
+horizontal_alignment = 1
+
+[node name="HSeparator" type="HSeparator" parent="Panel/VBoxContainer"]
+layout_mode = 2
+
+[node name="MemberListLabel" type="Label" parent="Panel/VBoxContainer"]
+layout_mode = 2
+text = "Members Online:"
+
+[node name="MemberList" type="ItemList" parent="Panel/VBoxContainer"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Footer" type="HBoxContainer" parent="Panel/VBoxContainer"]
+layout_mode = 2
+
+[node name="InviteInput" type="LineEdit" parent="Panel/VBoxContainer/Footer"]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "Player ID to invite..."
+
+[node name="InviteButton" type="Button" parent="Panel/VBoxContainer/Footer"]
+layout_mode = 2
+text = "Invite"
+
+[node name="CloseButton" type="Button" parent="Panel/VBoxContainer"]
+layout_mode = 2
+text = "Back to World"
+
+[connection signal="pressed" from="Panel/VBoxContainer/Footer/InviteButton" to="." method="_on_invite_pressed"]
+[connection signal="pressed" from="Panel/VBoxContainer/CloseButton" to="." method="_on_close_pressed"]

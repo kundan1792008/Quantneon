@@ -1,0 +1,63 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: quantneon-db
+    environment:
+      POSTGRES_USER: quantneon
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: quantneon
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantneon"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: quantneon-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    command: ["redis-server", "--appendonly", "yes"]
+
+  backend:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: quantneon-backend
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://quantneon:password@db:5432/quantneon?schema=public
+      - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=super_secret_jwt_key_quantneon_2024
+      - PORT=3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    # Pre-start command to ensure the DB is seeded in production
+    command: >
+      sh -c "npx prisma migrate deploy &&
+             npm start"
+
+  frontend:
+    build:
+      context: ./quantneon-web
+      dockerfile: Dockerfile
+    container_name: quantneon-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:

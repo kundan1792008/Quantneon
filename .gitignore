@@ -1,0 +1,13 @@
+node_modules/
+.godot/
+.next/
+dist/
+build/
+bin/
+obj/
+.DS_Store
+*.log
+.env
+.local-db/
+*.exe
+*.zip

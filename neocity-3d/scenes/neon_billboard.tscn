@@ -1,0 +1,41 @@
+[gd_scene load_steps=4 format=3 uid="uid://b535ino3j48va"]
+
+[ext_resource type="Script" path="res://scripts/neon_billboard.gd" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_panel"]
+albedo_color = Color(0.05, 0.05, 0.1, 1)
+metallic = 0.8
+roughness = 0.1
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_glow"]
+albedo_color = Color(1, 0, 1, 1)
+emission_enabled = true
+emission = Color(1, 0, 1, 1)
+emission_energy_multiplier = 3.0
+
+[node name="NeonBillboard" type="Node3D"]
+script = ExtResource("1_script")
+
+[node name="BackPanel" type="CSGBox3D" parent="."]
+use_collision = true
+size = Vector3(8, 4, 0.3)
+material = SubResource("StandardMaterial3D_panel")
+
+[node name="GlowBorder" type="CSGBox3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -0.15)
+use_collision = true
+size = Vector3(8.4, 4.4, 0.1)
+material = SubResource("StandardMaterial3D_glow")
+
+[node name="AdText" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.304991, 0, 0.2)
+modulate = Color(0, 1, 1, 1)
+text = "QUANTNEON"
+font_size = 96
+outline_size = 8
+
+[node name="SubText" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.00188899, -0.941901, 0.0382993)
+modulate = Color(1, 0.5, 1, 1)
+text = "The Future is AI"
+font_size = 48

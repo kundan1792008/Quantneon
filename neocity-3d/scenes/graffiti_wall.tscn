@@ -1,0 +1,38 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/graffiti_system.gd" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wall"]
+albedo_color = Color(0.15, 0.15, 0.15, 1)
+roughness = 0.9
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_trigger"]
+size = Vector3(6, 4, 4)
+
+[node name="GraffitiWall" type="Node3D"]
+script = ExtResource("1_script")
+
+[node name="WallPanel" type="CSGBox3D" parent="."]
+use_collision = true
+size = Vector3(6, 4, 0.2)
+material = SubResource("StandardMaterial3D_wall")
+
+[node name="ArtDisplay" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0.11)
+pixel_size = 0.02
+text = "SYNDICATE"
+font_size = 120
+outline_size = 16
+uppercase = true
+
+[node name="PromptLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -1.0, 0.15)
+visible = false
+text = "[E] Spray Paint"
+font_size = 32
+
+[node name="TriggerArea" type="Area3D" parent="."]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="TriggerArea"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 2.0)
+shape = SubResource("BoxShape3D_trigger")

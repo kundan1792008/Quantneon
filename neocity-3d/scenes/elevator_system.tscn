@@ -1,0 +1,44 @@
+[gd_scene load_steps=6 format=3 uid="uid://elevSys_9i2k"]
+
+[ext_resource type="Script" path="res://scripts/elevator_system.gd" id="1_elev"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_platform"]
+size = Vector3(6, 0.5, 6)
+
+[sub_resource type="StandardMaterial3D" id="StandardMat_platform"]
+albedo_color = Color(0.3, 0.3, 0.3, 1)
+metallic = 0.5
+roughness = 0.5
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_platform"]
+size = Vector3(6, 0.5, 6)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_interact"]
+size = Vector3(4, 3, 4)
+
+[node name="ElevatorSystem" type="AnimatableBody3D"]
+script = ExtResource("1_elev")
+
+[node name="PlatformMesh" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_platform")
+surface_material_override/0 = SubResource("StandardMat_platform")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("BoxShape3D_platform")
+
+[node name="InteractArea" type="Area3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
+collision_layer = 8
+collision_mask = 2
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="InteractArea"]
+shape = SubResource("BoxShape3D_interact")
+
+[node name="FloorLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0)
+billboard = 1
+text = "Floor: 0
+[E] Call/Select Floor"
+font_size = 64
+outline_render_priority = 0
+outline_modulate = Color(0, 0, 0, 1)

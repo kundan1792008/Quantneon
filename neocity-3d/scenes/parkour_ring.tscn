@@ -1,0 +1,27 @@
+[gd_scene load_steps=5 format=3 uid="uid://prk0rng0rng0s"]
+
+[ext_resource type="Script" path="res://scripts/parkour_ring.gd" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ring"]
+albedo_color = Color(1, 0.8, 0, 1)
+emission_enabled = true
+emission = Color(1, 0.6, 0, 1)
+emission_energy_multiplier = 2.0
+
+[sub_resource type="TorusMesh" id="TorusMesh_ring"]
+material = SubResource("StandardMaterial3D_ring")
+inner_radius = 1.0
+outer_radius = 1.2
+
+[sub_resource type="SphereShape3D" id="SphereShape3D_ring"]
+radius = 1.2
+
+[node name="ParkourRing" type="Area3D"]
+script = ExtResource("1_script")
+
+[node name="RingMesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, -4.37114e-08, -1, 0, 1, -4.37114e-08, 0, 0, 0)
+mesh = SubResource("TorusMesh_ring")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+shape = SubResource("SphereShape3D_ring")

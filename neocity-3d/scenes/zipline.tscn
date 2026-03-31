@@ -1,0 +1,60 @@
+[gd_scene load_steps=7 format=3 uid="uid://zipLn_7x3n"]
+
+[ext_resource type="Script" path="res://scripts/zipline.gd" id="1_zip"]
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_cable"]
+top_radius = 0.05
+bottom_radius = 0.05
+height = 1.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMat_cable"]
+transparency = 1
+albedo_color = Color(0, 1, 0.8, 0.8)
+emission_enabled = true
+emission = Color(0, 1, 0.8, 1)
+emission_energy_multiplier = 2.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_start"]
+size = Vector3(3, 3, 3)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_end"]
+size = Vector3(3, 3, 3)
+
+[node name="Zipline" type="Node3D"]
+script = ExtResource("1_zip")
+
+[node name="CableMesh" type="MeshInstance3D" parent="."]
+mesh = SubResource("CylinderMesh_cable")
+surface_material_override/0 = SubResource("StandardMat_cable")
+
+[node name="StartPoint" type="Area3D" parent="."]
+collision_layer = 8
+collision_mask = 2
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="StartPoint"]
+shape = SubResource("BoxShape3D_start")
+
+[node name="EndPoint" type="Area3D" parent="."]
+collision_layer = 8
+collision_mask = 2
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="EndPoint"]
+shape = SubResource("BoxShape3D_end")
+
+[node name="StartLabel" type="Label3D" parent="."]
+billboard = 1
+text = "[E] Ride Zipline"
+font_size = 32
+modulate = Color(0, 1, 0.8, 1)
+outline_render_priority = 0
+outline_modulate = Color(0, 0, 0, 1)
+visible = false
+
+[node name="EndLabel" type="Label3D" parent="."]
+billboard = 1
+text = "[E] Ride Zipline"
+font_size = 32
+modulate = Color(0, 1, 0.8, 1)
+outline_render_priority = 0
+outline_modulate = Color(0, 0, 0, 1)
+visible = false

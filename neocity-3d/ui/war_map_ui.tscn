@@ -1,0 +1,31 @@
+[gd_scene load_steps=2 format=3 uid="uid://d2k1n5q4y5j6p"]
+
+[ext_resource type="Script" path="res://scripts/war_map_ui.gd" id="1_w7r2e"]
+
+[node name="WarMap" type="Control"]
+layout_mode = 3
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -250.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = 300.0
+grow_horizontal = 0
+script = ExtResource("1_w7r2e")
+
+[node name="Panel" type="Panel" { "layout_mode": 1, "anchors_preset": 15, "anchor_right": 1, "anchor_bottom": 1 } ]
+
+[node name="VBoxContainer" type="VBoxContainer" { "layout_mode": 1, "anchors_preset": 15, "anchor_right": 1, "anchor_bottom": 1, "offset_left": 10, "offset_top": 10, "offset_right": -10, "offset_bottom": -10 } ]
+name = "VBoxContainer"
+
+[node name="Title" type="Label" { "text": "TERRITORY CONTROL", "horizontal_alignment": 1 } ]
+theme_override_colors/font_color = Color(0, 1, 1, 1)
+theme_override_font_sizes/font_size = 18
+
+[node name="HSeparator" type="HSeparator" ]
+
+[node name="ZonesContainer" type="VBoxContainer" ]
+name = "ZonesContainer"
+layout_mode = 2
+size_flags_vertical = 3
