@@ -48,7 +48,8 @@ export interface FeedResult {
   personalized: boolean;
 }
 
-// ─── Internal helpers ────────────────────────────────────────────────────────
+/** Multiplier applied to `limit` when fetching posts for AI reranking headroom. */
+const RANKING_HEADROOM_MULTIPLIER = 3;
 
 async function _getUserContext(userId: string): Promise<{ mood?: string; interests: string[] }> {
   // Fetch stored mood and inferred interests from the user record
@@ -111,7 +112,7 @@ export const NeonFeedService = {
 
     const [rawPosts, total] = await Promise.all([
       prisma.neonPost.findMany({
-        take: limit * 3, // Fetch 3× for AI reranking headroom
+        take: limit * RANKING_HEADROOM_MULTIPLIER, // Fetch 3× for AI reranking headroom
         skip: offset,
         include: {
           author: { select: { username: true, displayName: true, avatarUrl: true } },

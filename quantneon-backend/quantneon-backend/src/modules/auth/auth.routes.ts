@@ -22,6 +22,12 @@ export async function authRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post(
     '/sso',
     {
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: 60_000,
+        },
+      },
       schema: {
         description: 'Authenticate with a Quantmail JWT (Biometric SSO). No local passwords.',
         body: {

@@ -21,8 +21,10 @@ signal capacity_reached()
 @export var ambient_color: Color = Color(0.05, 0.0, 0.15) # Deep neon purple
 
 # ─── State ────────────────────────────────────────────────────────────────────
+/** Interpolation speed for avatar movement smoothing (0–1, higher = snappier). */
+@export var position_lerp_speed: float = 0.2
+@export var rotation_lerp_speed: float = 0.2
 var present_users: Dictionary = {} # { user_id: { display_name, avatar_node } }
-var active_stream_id: String = ""
 var _avatar_scene: PackedScene = null
 
 # ─── Lifecycle ────────────────────────────────────────────────────────────────
@@ -134,11 +136,11 @@ func _on_remote_avatar_moved(data: Dictionary) -> void:
 			data.get("y", 0.0),
 			data.get("z", 0.0)
 		)
-		entry.avatar_node.global_position = entry.avatar_node.global_position.lerp(target, 0.2)
+		entry.avatar_node.global_position = entry.avatar_node.global_position.lerp(target, position_lerp_speed)
 		entry.avatar_node.rotation.y = lerp_angle(
 			entry.avatar_node.rotation.y,
 			data.get("r", 0.0),
-			0.2
+			rotation_lerp_speed
 		)
 
 func _on_remote_avatar_emoted(data: Dictionary) -> void:
