@@ -2,8 +2,6 @@
 
 import { useState, useEffect } from "react";
 
-const DISPLAY_FPS = 60;
-
 interface HudOverlayProps {
   onEnterRoom: () => void;
   inRoom: boolean;
@@ -11,6 +9,7 @@ interface HudOverlayProps {
 
 export default function HudOverlay({ onEnterRoom, inRoom }: HudOverlayProps) {
   const [time, setTime] = useState("");
+  const [fps, setFps] = useState(0);
 
   useEffect(() => {
     const tick = () => {
@@ -27,6 +26,28 @@ export default function HudOverlay({ onEnterRoom, inRoom }: HudOverlayProps) {
     tick();
     const id = setInterval(tick, 1000);
     return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    let frameCount = 0;
+    let lastSample = performance.now();
+    let animationFrameId = 0;
+
+    const sampleFps = (now: number) => {
+      frameCount += 1;
+      const elapsed = now - lastSample;
+
+      if (elapsed >= 1000) {
+        setFps(Math.round((frameCount * 1000) / elapsed));
+        frameCount = 0;
+        lastSample = now;
+      }
+
+      animationFrameId = window.requestAnimationFrame(sampleFps);
+    };
+
+    animationFrameId = window.requestAnimationFrame(sampleFps);
+    return () => window.cancelAnimationFrame(animationFrameId);
   }, []);
 
   return (
@@ -52,7 +73,7 @@ export default function HudOverlay({ onEnterRoom, inRoom }: HudOverlayProps) {
           </span>
           <span>
             SYS:{" "}
-            <span className="text-[#ff00ff]">{DISPLAY_FPS} FPS</span>
+            <span className="text-[#ff00ff]">{fps || "--"} FPS</span>
           </span>
           <span className="text-[#00f5ff] font-mono">{time}</span>
         </div>
