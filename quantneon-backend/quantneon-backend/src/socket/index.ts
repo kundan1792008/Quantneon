@@ -24,7 +24,7 @@ export interface SocketUser {
   room?: string;
 }
 
-// TODO: Replace this fallback registry with a Redis-backed presence store before horizontal production scaling.
+// TODO(launch-blocker): Replace this fallback Map with a Redis-backed presence registry before multi-instance production rollout.
 const onlineUsers = new Map<string, SocketUser>();
 
 export function createSocketHub(httpServer: HttpServer): SocketIOServer {

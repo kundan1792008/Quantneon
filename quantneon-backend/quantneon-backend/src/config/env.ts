@@ -43,4 +43,5 @@ export const env = {
   // Rate limiting
   RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
   RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX ?? '100', 10),
+  SSO_RATE_LIMIT_MAX: parseInt(process.env.SSO_RATE_LIMIT_MAX ?? '10', 10),
 };

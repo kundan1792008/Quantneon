@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { env } from '../../config/env';
 import { prisma } from '../../config/database';
+import { redis } from '../../config/redis';
 import { verifyQuantmailToken } from '../../middleware/auth';
 import { logger } from '../../utils/logger';
 import '../../types/index';
@@ -9,6 +10,8 @@ import '../../types/index';
 const SsoSchema = z.object({
   token: z.string().min(1, 'Quantmail JWT is required'),
 });
+
+const getSsoRateLimitMax = () => Math.min(env.RATE_LIMIT_MAX, env.SSO_RATE_LIMIT_MAX);
 
 /**
  * POST /v1/auth/sso
@@ -21,14 +24,32 @@ const SsoSchema = z.object({
  */
 export async function authRoutes(fastify: FastifyInstance): Promise<void> {
   const ssoRateLimit = fastify.rateLimit({
-    max: Math.min(env.RATE_LIMIT_MAX, 10),
+    max: getSsoRateLimitMax(),
     timeWindow: env.RATE_LIMIT_WINDOW_MS,
   });
+
+  const enforceSsoRateLimit = async (request: FastifyRequest, reply: FastifyReply) => {
+    const clientIp = request.ip || 'unknown';
+    const rateLimitKey = `ratelimit:sso:${clientIp}`;
+
+    try {
+      const attempts = await redis.incr(rateLimitKey);
+      if (attempts === 1) {
+        await redis.pexpire(rateLimitKey, env.RATE_LIMIT_WINDOW_MS);
+      }
+
+      if (attempts > getSsoRateLimitMax()) {
+        return reply.code(429).send({ error: 'Too many authentication attempts. Please try again later.' });
+      }
+    } catch (err) {
+      logger.warn({ err, clientIp }, 'SSO fallback rate limit check failed');
+    }
+  };
 
   fastify.post(
     '/sso',
     {
-      preHandler: [ssoRateLimit],
+      preHandler: [ssoRateLimit, enforceSsoRateLimit],
       schema: {
         description: 'Authenticate with a Quantmail JWT (Biometric SSO). No local passwords.',
         body: {
