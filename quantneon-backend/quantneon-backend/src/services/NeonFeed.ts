@@ -122,7 +122,7 @@ export const NeonFeedService = {
       prisma.neonPost.count(),
     ]);
 
-    const posts = rawPosts.map((p) => ({ ...p, score: 0 })) as FeedPost[];
+    const posts = rawPosts.map((post: Omit<FeedPost, 'score'>) => ({ ...post, score: 0 }));
     const context = await _getUserContext(userId);
     const ranked = await _rankWithAI(posts, context);
     const page = ranked.slice(0, limit);
