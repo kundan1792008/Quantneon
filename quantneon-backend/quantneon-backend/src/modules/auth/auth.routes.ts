@@ -1,5 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
+import { env } from '../../config/env';
 import { prisma } from '../../config/database';
 import { verifyQuantmailToken } from '../../middleware/auth';
 import { logger } from '../../utils/logger';
@@ -19,13 +20,15 @@ const SsoSchema = z.object({
  * No local passwords are stored or accepted.
  */
 export async function authRoutes(fastify: FastifyInstance): Promise<void> {
+  const ssoRateLimit = fastify.rateLimit({
+    max: Math.min(env.RATE_LIMIT_MAX, 10),
+    timeWindow: env.RATE_LIMIT_WINDOW_MS,
+  });
+
   fastify.post(
     '/sso',
     {
-      preHandler: fastify.rateLimit({
-        max: 10,
-        timeWindow: 60_000,
-      }),
+      preHandler: [ssoRateLimit],
       schema: {
         description: 'Authenticate with a Quantmail JWT (Biometric SSO). No local passwords.',
         body: {

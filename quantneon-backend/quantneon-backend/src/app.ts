@@ -4,7 +4,6 @@ import Fastify, { FastifyError } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import { createServer } from 'http';
 import { env } from './config/env';
 import { redis } from './config/redis';
 import { logger } from './utils/logger';
@@ -71,8 +70,7 @@ async function start() {
     const fastify = await buildApp();
 
     // ── HTTP + Socket.io ───────────────────────────────────────────────────
-    const httpServer = createServer(fastify.server);
-    createSocketHub(httpServer);
+    createSocketHub(fastify.server);
 
     // ── Redis ──────────────────────────────────────────────────────────────
     try {
@@ -82,10 +80,8 @@ async function start() {
     }
 
     // ── Start listening ────────────────────────────────────────────────────
-    await fastify.ready();
-    httpServer.listen({ port: env.PORT, host: '0.0.0.0' }, () => {
-      logger.info(`Quantneon backend listening on port ${env.PORT}`);
-    });
+    await fastify.listen({ port: env.PORT, host: '0.0.0.0' });
+    logger.info(`Quantneon backend listening on port ${env.PORT}`);
   } catch (err) {
     logger.fatal({ err }, 'Failed to start server');
     process.exit(1);

@@ -24,7 +24,7 @@ export interface SocketUser {
   room?: string;
 }
 
-// Online user registry (in-memory; production should use Redis hash)
+// TODO: Replace this fallback registry with a Redis-backed presence store before horizontal production scaling.
 const onlineUsers = new Map<string, SocketUser>();
 
 export function createSocketHub(httpServer: HttpServer): SocketIOServer {
