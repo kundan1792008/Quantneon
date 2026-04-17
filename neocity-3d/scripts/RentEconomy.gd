@@ -673,6 +673,7 @@ func _seed_npc_tenants_if_offline() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 1337
 	var keys: Array = los.blocks.keys()
+	if keys.is_empty(): return
 	for i in range(min(30, keys.size())):
 		var k: String = keys[rng.randi_range(0, keys.size() - 1)]
 		var block: Dictionary = los.get_block(k)

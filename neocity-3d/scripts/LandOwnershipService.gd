@@ -551,15 +551,18 @@ func _recompute_leaderboard() -> void:
 		by_owner[id].points += int(e.points)
 	# Add a passive +1 per owned block so just-holding property ranks.
 	for owner_id in _blocks_by_owner.keys():
+		var owned_list: Array = _blocks_by_owner[owner_id]
+		if owned_list.is_empty():
+			continue
 		if not by_owner.has(owner_id):
-			var any_block_key: String = _blocks_by_owner[owner_id][0]
+			var any_block_key: String = owned_list[0]
 			by_owner[owner_id] = {
 				"owner_id": owner_id,
 				"owner_name": blocks[any_block_key].owner_name,
 				"points": 0,
 			}
-		by_owner[owner_id].points += _blocks_by_owner[owner_id].size()
-		by_owner[owner_id]["blocks_owned"] = _blocks_by_owner[owner_id].size()
+		by_owner[owner_id].points += owned_list.size()
+		by_owner[owner_id]["blocks_owned"] = owned_list.size()
 	var arr: Array = by_owner.values()
 	arr.sort_custom(func(a, b): return int(a.points) > int(b.points))
 	for i in range(arr.size()):
