@@ -1,7 +1,7 @@
 ## Central World Sync Manager
 ## Orchestrates Socket.IO events and updates the 3D scene.
 ##
-## Spatial-Partitioning layer (10 K player support)
+## Spatial-Partitioning layer (10K player support)
 ## ─────────────────────────────────────────────────
 ## All remote entities are bucketed into a spatial hash-grid with cell size
 ## SPATIAL_CELL_SIZE (world units).  Each frame the grid is consulted to find
@@ -54,7 +54,7 @@ var local_player: CharacterBody3D
 # Rebuilt on every zone_update snapshot so it always reflects the server state.
 var _spatial_grid: Dictionary = {}
 
-# Last known server-reported world position (in scaled coords x/10, y/10) per entity id.
+# Last known server-reported world position (in scaled coords x/10, z/10) per entity id.
 var _entity_server_pos: Dictionary = {} # {id: Vector3}
 
 signal world_entered(data)
@@ -230,12 +230,14 @@ func _update_or_create_entity(data: Dictionary, scene: PackedScene, type: String
 
 	var target_pos = Vector3(data.x / 10.0, 1.0, data.y / 10.0)
 
-	# Keep the spatial index up-to-date for this entity.
+	# Keep the spatial index up-to-date for this entity regardless of distance.
+	# The position must always be fresh so the visibility sweep can correctly
+	# show the node the moment the player walks within visual_range.
 	_entity_server_pos[id] = target_pos
-	
+
 	# Skip the expensive Tween/state work for entities outside visual range.
-	# The visibility sweep will show/hide the node; we just need the position
-	# recorded above so the sweep can make the right decision.
+	# Their node is already hidden by _run_spatial_visibility_sweep; the
+	# recorded position above ensures they re-appear correctly when approached.
 	if local_player != null:
 		var dist_sq: float = local_player.global_position.distance_squared_to(target_pos)
 		if dist_sq > visual_range * visual_range:

@@ -68,6 +68,19 @@ var _lod_frame: int = 0
 # Reference to the local camera for LOD distance calculations.
 var _camera: Camera3D
 
+## Fraction of max_building_height applied to supertall spires.
+const SUPERTALL_HEIGHT_MULT: float = 1.8
+## Footprint fraction applied to supertall spires (narrower profile).
+const SUPERTALL_FOOTPRINT_MULT: float = 0.6
+## Fraction of max_building_height applied to squat podium blocks.
+const PODIUM_HEIGHT_MULT: float = 0.5
+## Footprint fraction applied to squat podium blocks (wider profile).
+const PODIUM_FOOTPRINT_MULT: float = 1.2
+## Probability threshold below which a building becomes a supertall spire.
+const SUPERTALL_PROB: float = 0.15
+## Probability threshold below which a building becomes a squat podium.
+const PODIUM_PROB: float = 0.45
+
 # Neon palette – each building picks a random pair from this list.
 const NEON_PALETTE: Array = [
 	[Color(1.0, 0.0, 0.8), Color(0.0, 0.8, 1.0)],   # Pink / Cyan
@@ -169,12 +182,12 @@ func _generate_building(lot_origin: Vector3, lot_size: float, tall_rooftops: Arr
 
 	# Choose a tiered profile: tall spires are rare, squat blocks common.
 	var profile_roll: float = _rng.randf()
-	if profile_roll < 0.15:
-		height *= 1.8   # Supertall
-		fp *= 0.6       # Narrower spire
-	elif profile_roll < 0.45:
-		height *= 0.5   # Squat podium
-		fp *= 1.2
+	if profile_roll < SUPERTALL_PROB:
+		height *= SUPERTALL_HEIGHT_MULT
+		fp *= SUPERTALL_FOOTPRINT_MULT
+	elif profile_roll < PODIUM_PROB:
+		height *= PODIUM_HEIGHT_MULT
+		fp *= PODIUM_FOOTPRINT_MULT
 		fp = min(fp, lot_size)
 
 	# Create mesh
@@ -324,7 +337,9 @@ func _spawn_sky_bridge(from: Vector3, to: Vector3) -> void:
 
 	var mesh_inst: MeshInstance3D = MeshInstance3D.new()
 	var box: BoxMesh = BoxMesh.new()
-	box.size = Vector3(length, bridge_h, bridge_w)
+	# length maps to the Z-axis (local forward); after rotation.y the Z-axis
+	# aligns with the diff vector, so the bridge spans correctly between buildings.
+	box.size = Vector3(bridge_w, bridge_h, length)
 	mesh_inst.mesh = box
 
 	mesh_inst.position = Vector3(mid.x, bridge_y, mid.z)
@@ -387,9 +402,11 @@ func _scatter_street_lights() -> void:
 		# Snap to road-side positions (between blocks on either axis).
 		# A simple approximation: snap x or z to a block edge.
 		if _rng.randf() > 0.5:
-			x = round(x / stride) * stride + block_size * 0.5 * sign(x - round(x / stride) * stride)
+			var snapped_x: float = round(x / stride) * stride
+			x = snapped_x + block_size * 0.5 * sign(x - snapped_x)
 		else:
-			z = round(z / stride) * stride + block_size * 0.5 * sign(z - round(z / stride) * stride)
+			var snapped_z: float = round(z / stride) * stride
+			z = snapped_z + block_size * 0.5 * sign(z - snapped_z)
 
 		var col_idx: int = _rng.randi() % NEON_LIGHT_COLORS.size()
 		var neon: Color = NEON_LIGHT_COLORS[col_idx]

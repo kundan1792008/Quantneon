@@ -108,11 +108,10 @@ void fragment() {
 	inner_uv = clamp(inner_uv, 0.0, 1.0);
 
 	// The view ray in window-local space.
-	// VIEW is the view-space fragment-to-camera direction; we approximate the
-	// tangent-space ray from the UV gradient (valid for flat window geometry).
-	vec3 view_ts = normalize(vec3(inner_uv - 0.5, 1.0));
-	// Perspective skew: use UV and aspect to tilt the ray toward the viewer.
-	vec3 ray_dir = normalize(vec3((inner_uv - 0.5) * 1.2, 1.0));
+	// We use a perspective-skewed ray from the window UV to simulate
+	// parallax depth: the ray tilts toward the viewer as UV moves from centre.
+	// Negative Z direction points into the virtual room (back wall is at z = -depth).
+	vec3 ray_dir = normalize(vec3((inner_uv - 0.5) * 1.2, -1.0));
 
 	// Ray origin at the window surface (z=0 in local space, xy = inner_uv).
 	vec3 ray_orig = vec3(inner_uv.x, inner_uv.y, 0.0);
