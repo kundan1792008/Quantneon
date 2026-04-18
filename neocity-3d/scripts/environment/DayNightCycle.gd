@@ -1,615 +1,538 @@
+## DayNightCycle — Full 24-hour day/night cycle for the Neo City metaverse
+## Compresses a 24-hour day into 30 minutes real-time.
+## Controls sun/moon DirectionalLight3D, sky gradients, star field,
+## and auto-enables/disables street lights at dusk and dawn.
 extends Node
-class_name DayNightCycle
 
-# =============================================================================
-# DayNightCycle.gd
-# -----------------------------------------------------------------------------
-# Drives the virtual 24-hour clock of Neo City 3D.
-#
-# Responsibilities:
-#   * Advance world time, 24 virtual hours per `day_length_seconds`
-#     (default 1800 = 30 real minutes, as specified by issue #20).
-#   * Rotate the primary `DirectionalLight3D` around the X axis so the sun
-#     traces from sunrise, to high noon, to sunset, while a moon DirectionalLight
-#     travels 180 degrees out of phase.
-#   * Sample a sky-gradient palette and push it into `ProceduralSkyMaterial`
-#     (top/horizon/ground colors) and `Environment.ambient_light_color`.
-#   * Enable / disable shadows and lights based on solar altitude so the GPU
-#     never wastes cycles on a sun that is below the horizon.
-#   * Auto-switch all registered StreetLight / NeonBillboard nodes on at
-#     civil dusk (solar altitude <= +6°) and off at civil dawn.
-#   * Fade a StarField mesh in during astronomical night, and light up
-#     constellation overlays (configurable constellation list).
-#   * Emit signals on sunrise, sunset, midnight, and hour boundaries.
-#   * Expose helper queries (is_day, is_night, is_golden_hour, etc.).
-#
-# This script is a pure controller — it reads and writes scene nodes but owns
-# no heavy resources. Safe to run as an autoload.
-#
-# No TODOs. No placeholders.
-# =============================================================================
+# ── Signals ───────────────────────────────────────────────────────────────────
 
-signal time_changed(new_time_hours: float)
 signal hour_changed(new_hour: int)
-signal sunrise_started()
-signal sunrise_ended()
-signal sunset_started()
-signal sunset_ended()
-signal midnight_reached()
-signal noon_reached()
-signal golden_hour_started()
-signal golden_hour_ended()
-signal blue_hour_started()
-signal blue_hour_ended()
-signal day_phase_changed(phase_name: String)
-signal street_lights_requested(on: bool)
+signal sunrise()
+signal sunset()
+signal midnight()
+signal noon()
+signal dusk_started()
+signal dawn_started()
+signal street_lights_on()
+signal street_lights_off()
+signal time_of_day_changed(normalized_time: float)
 
-# ---------------------------------------------------------------------------
-# Designer-tunable parameters
-# ---------------------------------------------------------------------------
-@export_range(60.0, 86400.0, 1.0) var day_length_seconds: float = 1800.0
+# ── Export Parameters ──────────────────────────────────────────────────────────
+
+@export var day_duration_minutes: float = 30.0
 @export var start_hour: float = 8.0
-@export var smoothing: float = 3.0     # Interpolation rate for network snap-corrections.
-@export var pause_time: bool = false
-@export var auto_advance: bool = true
-@export var tilt_degrees: float = 23.5 # Axial tilt for a bit of realism.
-@export var north_offset_degrees: float = 0.0
+@export var time_scale: float = 1.0
+@export var sun_path_tilt_degrees: float = 30.0
+@export var moon_phase: int = 4    # 0-7 (0=new, 4=full)
+@export var latitude_degrees: float = 37.0
+@export var enable_stars: bool = true
+@export var enable_moon: bool = true
+@export var enable_street_lights: bool = true
+@export var street_light_on_hour: float = 19.5
+@export var street_light_off_hour: float = 6.5
+@export var enable_aurora: bool = true
+@export var aurora_chance_per_night: float = 0.15
+@export var debug_time: bool = false
 
-@export_group("Sky Colors")
-@export var color_midnight_top: Color = Color(0.01, 0.015, 0.055)
-@export var color_midnight_horizon: Color = Color(0.05, 0.06, 0.14)
-@export var color_midnight_ground: Color = Color(0.02, 0.02, 0.04)
+# ── Internal State ─────────────────────────────────────────────────────────────
 
-@export var color_dawn_top: Color = Color(0.23, 0.27, 0.55)
-@export var color_dawn_horizon: Color = Color(1.0, 0.55, 0.35)
-@export var color_dawn_ground: Color = Color(0.15, 0.12, 0.15)
+var current_hour: float = 8.0       # 0.0 – 23.999
+var current_day: int = 0
+var previous_integer_hour: int = -1
+var street_lights_enabled: bool = false
+var aurora_active: bool = false
+var aurora_intensity: float = 0.0
+var aurora_duration_remaining: float = 0.0
+var star_twinkle_offset: float = 0.0
+var sun_intensity_override: float = -1.0  # -1 = auto
+var moon_intensity_override: float = -1.0
 
-@export var color_day_top: Color = Color(0.15, 0.38, 0.7)
-@export var color_day_horizon: Color = Color(0.65, 0.78, 0.92)
-@export var color_day_ground: Color = Color(0.25, 0.27, 0.3)
+# ── Cached Sky Gradient Keyframes ─────────────────────────────────────────────
+# Each keyframe: [hour, sky_top, sky_horizon, ground, sun_energy, ambient_energy, sun_color]
 
-@export var color_dusk_top: Color = Color(0.35, 0.15, 0.45)
-@export var color_dusk_horizon: Color = Color(1.0, 0.4, 0.35)
-@export var color_dusk_ground: Color = Color(0.2, 0.1, 0.15)
+const SKY_KEYFRAMES: Array = [
+	# Midnight
+	{ "hour": 0.0,  "sky_top": Color(0.01, 0.01, 0.06), "sky_horizon": Color(0.03, 0.03, 0.08),
+	  "ground": Color(0.01, 0.01, 0.02), "sun_energy": 0.0, "ambient": 0.04,
+	  "sun_color": Color(0.5, 0.6, 1.0) },
+	# Pre-dawn
+	{ "hour": 4.5,  "sky_top": Color(0.04, 0.04, 0.12), "sky_horizon": Color(0.12, 0.08, 0.18),
+	  "ground": Color(0.02, 0.01, 0.03), "sun_energy": 0.0, "ambient": 0.06,
+	  "sun_color": Color(0.6, 0.5, 0.9) },
+	# Sunrise start
+	{ "hour": 6.0,  "sky_top": Color(0.12, 0.15, 0.4),  "sky_horizon": Color(0.8, 0.45, 0.15),
+	  "ground": Color(0.06, 0.04, 0.02), "sun_energy": 0.3, "ambient": 0.25,
+	  "sun_color": Color(1.0, 0.6, 0.3) },
+	# Golden hour morning
+	{ "hour": 7.0,  "sky_top": Color(0.25, 0.35, 0.62), "sky_horizon": Color(0.9, 0.65, 0.3),
+	  "ground": Color(0.08, 0.06, 0.03), "sun_energy": 0.65, "ambient": 0.55,
+	  "sun_color": Color(1.0, 0.78, 0.45) },
+	# Morning
+	{ "hour": 9.0,  "sky_top": Color(0.22, 0.38, 0.72), "sky_horizon": Color(0.65, 0.80, 0.92),
+	  "ground": Color(0.10, 0.08, 0.04), "sun_energy": 0.9, "ambient": 0.8,
+	  "sun_color": Color(1.0, 0.92, 0.75) },
+	# Midday
+	{ "hour": 12.0, "sky_top": Color(0.18, 0.32, 0.70), "sky_horizon": Color(0.62, 0.78, 0.92),
+	  "ground": Color(0.10, 0.08, 0.04), "sun_energy": 1.0, "ambient": 1.0,
+	  "sun_color": Color(1.0, 0.97, 0.90) },
+	# Afternoon
+	{ "hour": 15.0, "sky_top": Color(0.20, 0.34, 0.68), "sky_horizon": Color(0.65, 0.79, 0.91),
+	  "ground": Color(0.10, 0.08, 0.04), "sun_energy": 0.88, "ambient": 0.85,
+	  "sun_color": Color(1.0, 0.95, 0.80) },
+	# Golden hour evening
+	{ "hour": 17.5, "sky_top": Color(0.28, 0.22, 0.50), "sky_horizon": Color(0.88, 0.55, 0.25),
+	  "ground": Color(0.08, 0.05, 0.02), "sun_energy": 0.55, "ambient": 0.45,
+	  "sun_color": Color(1.0, 0.65, 0.2) },
+	# Sunset
+	{ "hour": 18.5, "sky_top": Color(0.15, 0.10, 0.32), "sky_horizon": Color(0.75, 0.35, 0.15),
+	  "ground": Color(0.05, 0.03, 0.01), "sun_energy": 0.25, "ambient": 0.22,
+	  "sun_color": Color(1.0, 0.45, 0.1) },
+	# Dusk / twilight
+	{ "hour": 19.5, "sky_top": Color(0.07, 0.05, 0.18), "sky_horizon": Color(0.25, 0.15, 0.35),
+	  "ground": Color(0.02, 0.01, 0.03), "sun_energy": 0.0, "ambient": 0.10,
+	  "sun_color": Color(0.8, 0.4, 0.6) },
+	# Night
+	{ "hour": 21.0, "sky_top": Color(0.02, 0.02, 0.07), "sky_horizon": Color(0.04, 0.04, 0.10),
+	  "ground": Color(0.01, 0.01, 0.02), "sun_energy": 0.0, "ambient": 0.05,
+	  "sun_color": Color(0.5, 0.55, 1.0) },
+	# Late night (wraps back to midnight)
+	{ "hour": 24.0, "sky_top": Color(0.01, 0.01, 0.06), "sky_horizon": Color(0.03, 0.03, 0.08),
+	  "ground": Color(0.01, 0.01, 0.02), "sun_energy": 0.0, "ambient": 0.04,
+	  "sun_color": Color(0.5, 0.6, 1.0) },
+]
 
-@export var color_night_top: Color = Color(0.02, 0.025, 0.08)
-@export var color_night_horizon: Color = Color(0.08, 0.1, 0.18)
-@export var color_night_ground: Color = Color(0.02, 0.02, 0.04)
-
-@export_group("Lighting")
-@export var sun_max_energy: float = 1.35
-@export var sun_tint_dawn: Color = Color(1.0, 0.72, 0.5)
-@export var sun_tint_day: Color = Color(1.0, 0.98, 0.94)
-@export var sun_tint_dusk: Color = Color(1.0, 0.55, 0.4)
-@export var moon_max_energy: float = 0.12
-@export var moon_tint: Color = Color(0.6, 0.72, 1.0)
-
-@export_group("Stars")
-@export var star_fade_start_altitude_deg: float = -2.0
-@export var star_fade_end_altitude_deg: float = -10.0
-@export var enable_constellations: bool = true
-
-# ---------------------------------------------------------------------------
-# Scene references
-# ---------------------------------------------------------------------------
-@export var sun_path: NodePath
-@export var moon_path: NodePath
-@export var environment_path: NodePath
-@export var star_field_path: NodePath
-@export var constellation_group_path: NodePath
+# ── Scene References ───────────────────────────────────────────────────────────
 
 var sun_light: DirectionalLight3D = null
 var moon_light: DirectionalLight3D = null
 var world_environment: WorldEnvironment = null
-var star_field: Node3D = null
-var constellation_group: Node3D = null
+var street_lights: Array = []
+var star_mesh_instance: MeshInstance3D = null
+var aurora_mesh: MeshInstance3D = null
+var sky_material: ProceduralSkyMaterial = null
 
-# ---------------------------------------------------------------------------
-# Runtime state
-# ---------------------------------------------------------------------------
-var current_hours: float = 8.0
-var target_hours: float = 8.0
-var _last_hour_int: int = -1
-var _last_phase: String = ""
-var _in_sunrise: bool = false
-var _in_sunset: bool = false
-var _in_golden: bool = false
-var _in_blue: bool = false
-var _street_lights_on: bool = false
-var _registered_street_lights: Array[Node] = []
-var _registered_neons: Array[Node] = []
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Day phase thresholds (hours, 0..24).
-# ---------------------------------------------------------------------------
-const PHASE_NIGHT_END: float = 4.5
-const PHASE_DAWN_START: float = 4.5
-const PHASE_SUNRISE_START: float = 5.5
-const PHASE_SUNRISE_END: float = 6.75
-const PHASE_MORNING_END: float = 11.0
-const PHASE_NOON: float = 12.0
-const PHASE_AFTERNOON_END: float = 16.5
-const PHASE_GOLDEN_HOUR_START: float = 17.0
-const PHASE_SUNSET_START: float = 18.25
-const PHASE_SUNSET_END: float = 19.5
-const PHASE_BLUE_HOUR_END: float = 20.5
-const PHASE_NIGHT_START: float = 21.0
-
-# ---------------------------------------------------------------------------
-# Lifecycle
-# ---------------------------------------------------------------------------
 func _ready() -> void:
-	current_hours = start_hour
-	target_hours = start_hour
-	_resolve_scene_refs()
-
+	current_hour = start_hour
+	previous_integer_hour = int(current_hour)
+	_locate_scene_nodes()
+	_setup_moon_light()
+	_discover_street_lights()
+	_apply_time_of_day(current_hour, true)
+	if debug_time:
+		print("[DayNightCycle] Ready — start hour: %.1f" % current_hour)
 
 func _process(delta: float) -> void:
-	_resolve_scene_refs_lazy()
-	if auto_advance and not pause_time:
-		_advance_time(delta)
-	_smooth_toward_target(delta)
-	_apply_sun_and_moon()
-	_apply_sky_and_environment()
-	_apply_stars()
-	_check_phase_events()
+	_advance_time(delta)
+	_apply_time_of_day(current_hour, false)
+	_update_star_field(delta)
+	_update_aurora(delta)
+	_check_hour_events()
 	_update_street_lights()
 
+# ── Node Discovery ─────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Scene resolution
-# ---------------------------------------------------------------------------
-func _resolve_scene_refs() -> void:
-	var root: Node = get_tree().root
-	if sun_path != NodePath(""):
-		sun_light = get_node_or_null(sun_path) as DirectionalLight3D
-	if sun_light == null:
-		sun_light = root.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
-	if sun_light == null:
-		sun_light = root.find_child("Sun", true, false) as DirectionalLight3D
+func _locate_scene_nodes() -> void:
+	sun_light = get_tree().root.find_child("DirectionalLight3D", true, false) as DirectionalLight3D
+	if not sun_light:
+		sun_light = get_tree().root.find_child("SunLight", true, false) as DirectionalLight3D
+	world_environment = get_tree().root.find_child("WorldEnvironment", true, false) as WorldEnvironment
+	if world_environment and world_environment.environment:
+		var env := world_environment.environment
+		if env.sky and env.sky.sky_material is ProceduralSkyMaterial:
+			sky_material = env.sky.sky_material as ProceduralSkyMaterial
 
-	if moon_path != NodePath(""):
-		moon_light = get_node_or_null(moon_path) as DirectionalLight3D
-	if moon_light == null:
-		moon_light = root.find_child("Moon", true, false) as DirectionalLight3D
+func _setup_moon_light() -> void:
+	if not enable_moon:
+		return
+	moon_light = DirectionalLight3D.new()
+	moon_light.name = "MoonLight"
+	moon_light.light_color = Color(0.72, 0.82, 1.0)
+	moon_light.light_energy = 0.0
+	moon_light.shadow_enabled = false
+	add_child(moon_light)
 
-	if environment_path != NodePath(""):
-		world_environment = get_node_or_null(environment_path) as WorldEnvironment
-	if world_environment == null:
-		world_environment = root.find_child("WorldEnvironment", true, false) as WorldEnvironment
+func _discover_street_lights() -> void:
+	street_lights.clear()
+	var candidates := get_tree().get_nodes_in_group("street_lights")
+	for node in candidates:
+		street_lights.append(node)
+	var by_name := get_tree().root.find_children("StreetLight*", "Node3D", true, false)
+	for node in by_name:
+		if not street_lights.has(node):
+			street_lights.append(node)
+	if debug_time:
+		print("[DayNightCycle] Discovered %d street lights." % street_lights.size())
 
-	if star_field_path != NodePath(""):
-		star_field = get_node_or_null(star_field_path) as Node3D
-	if star_field == null:
-		star_field = root.find_child("StarField", true, false) as Node3D
+# ── Time Advancement ───────────────────────────────────────────────────────────
 
-	if constellation_group_path != NodePath(""):
-		constellation_group = get_node_or_null(constellation_group_path) as Node3D
-	if constellation_group == null:
-		constellation_group = root.find_child("Constellations", true, false) as Node3D
-
-
-func _resolve_scene_refs_lazy() -> void:
-	if sun_light == null or world_environment == null:
-		_resolve_scene_refs()
-
-
-# ---------------------------------------------------------------------------
-# Time advancement
-# ---------------------------------------------------------------------------
 func _advance_time(delta: float) -> void:
-	if day_length_seconds <= 0.0:
+	var real_seconds_per_game_day := day_duration_minutes * 60.0
+	var hours_per_second := 24.0 / real_seconds_per_game_day
+	current_hour += delta * hours_per_second * time_scale
+	if current_hour >= 24.0:
+		current_hour -= 24.0
+		current_day += 1
+		_on_new_day()
+	time_of_day_changed.emit(current_hour / 24.0)
+
+func _on_new_day() -> void:
+	if debug_time:
+		print("[DayNightCycle] New day: %d" % current_day)
+	if enable_aurora and randf() < aurora_chance_per_night:
+		_start_aurora()
+
+# ── Sun/Moon Rotation ─────────────────────────────────────────────────────────
+
+func _compute_sun_angle_deg(hour: float) -> float:
+	# Sun rises at hour 6, sets at hour 18; below horizon otherwise
+	var solar_noon := 12.0
+	var angle := (hour - solar_noon) / 12.0 * 180.0
+	return angle
+
+func _compute_moon_angle_deg(hour: float) -> float:
+	# Moon is roughly opposite the sun
+	var solar_noon := 12.0
+	var angle := (hour - solar_noon) / 12.0 * 180.0 + 180.0
+	return angle
+
+func _apply_sun_rotation(hour: float) -> void:
+	if not sun_light:
 		return
-	var hours_per_second: float = 24.0 / day_length_seconds
-	target_hours += delta * hours_per_second
-	while target_hours >= 24.0:
-		target_hours -= 24.0
-	while target_hours < 0.0:
-		target_hours += 24.0
+	var angle := _compute_sun_angle_deg(hour)
+	var tilt := sun_path_tilt_degrees
+	sun_light.rotation_degrees = Vector3(-angle, tilt, 0.0)
 
-
-func _smooth_toward_target(delta: float) -> void:
-	# When the network snaps the clock, interpolate gently unless the
-	# discrepancy is enormous (half a day) — in which case snap to avoid
-	# the clock running backwards visibly.
-	var diff: float = target_hours - current_hours
-	while diff > 12.0: diff -= 24.0
-	while diff < -12.0: diff += 24.0
-	if abs(diff) > 6.0:
-		current_hours = target_hours
+func _apply_moon_rotation(hour: float) -> void:
+	if not moon_light:
 		return
-	current_hours += diff * clamp(delta * smoothing, 0.0, 1.0)
-	while current_hours >= 24.0: current_hours -= 24.0
-	while current_hours < 0.0: current_hours += 24.0
-	emit_signal("time_changed", current_hours)
+	var angle := _compute_moon_angle_deg(hour)
+	sun_light.rotation_degrees if sun_light else Vector3.ZERO
+	moon_light.rotation_degrees = Vector3(-angle, -sun_path_tilt_degrees * 0.5, 0.0)
 
+# ── Sky Gradient Interpolation ────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-func set_time_hours(h: float) -> void:
-	h = fposmod(h, 24.0)
-	target_hours = h
-	current_hours = h
+func _sample_sky_keyframe(hour: float) -> Dictionary:
+	var h := fmod(hour, 24.0)
+	var prev_kf: Dictionary = SKY_KEYFRAMES[0]
+	var next_kf: Dictionary = SKY_KEYFRAMES[0]
 
+	for i in range(SKY_KEYFRAMES.size()):
+		var kf: Dictionary = SKY_KEYFRAMES[i]
+		var kf_hour: float = kf["hour"]
+		if kf_hour <= h:
+			prev_kf = kf
+		else:
+			next_kf = kf
+			break
 
-func snap_to_hour(h: float) -> void:
-	set_time_hours(h)
+	var span: float = next_kf["hour"] - prev_kf["hour"]
+	var t: float = 0.0
+	if span > 0.001:
+		t = (h - prev_kf["hour"]) / span
+	t = clampf(t, 0.0, 1.0)
+	t = _smooth_step(t)
 
+	return {
+		"sky_top":     (prev_kf["sky_top"] as Color).lerp(next_kf["sky_top"], t),
+		"sky_horizon": (prev_kf["sky_horizon"] as Color).lerp(next_kf["sky_horizon"], t),
+		"ground":      (prev_kf["ground"] as Color).lerp(next_kf["ground"], t),
+		"sun_energy":  lerpf(prev_kf["sun_energy"], next_kf["sun_energy"], t),
+		"ambient":     lerpf(prev_kf["ambient"], next_kf["ambient"], t),
+		"sun_color":   (prev_kf["sun_color"] as Color).lerp(next_kf["sun_color"], t),
+	}
 
-func request_time(h: float) -> void:
-	h = fposmod(h, 24.0)
-	target_hours = h
+# ── Apply All Time-of-Day Effects ─────────────────────────────────────────────
 
+func _apply_time_of_day(hour: float, instant: bool) -> void:
+	var kf := _sample_sky_keyframe(hour)
 
-func get_time_hours() -> float:
-	return current_hours
-
-
-func get_time_seconds() -> float:
-	return current_hours * 3600.0
-
-
-func get_time_string() -> String:
-	var hr: int = int(floor(current_hours))
-	var min_f: float = (current_hours - float(hr)) * 60.0
-	var mn: int = int(floor(min_f))
-	return "%02d:%02d" % [hr, mn]
-
-
-func get_time_string_12h() -> String:
-	var hr: int = int(floor(current_hours))
-	var mn: int = int(floor((current_hours - float(hr)) * 60.0))
-	var suffix: String = "AM" if hr < 12 else "PM"
-	var disp_hr: int = hr % 12
-	if disp_hr == 0: disp_hr = 12
-	return "%d:%02d %s" % [disp_hr, mn, suffix]
-
-
-func is_day() -> bool:
-	return current_hours >= PHASE_SUNRISE_END and current_hours < PHASE_SUNSET_START
-
-
-func is_night() -> bool:
-	return current_hours >= PHASE_NIGHT_START or current_hours < PHASE_DAWN_START
-
-
-func is_dawn() -> bool:
-	return current_hours >= PHASE_DAWN_START and current_hours < PHASE_SUNRISE_END
-
-
-func is_dusk() -> bool:
-	return current_hours >= PHASE_SUNSET_START and current_hours < PHASE_NIGHT_START
-
-
-func is_golden_hour() -> bool:
-	return current_hours >= PHASE_GOLDEN_HOUR_START and current_hours < PHASE_SUNSET_START
-
-
-func is_blue_hour() -> bool:
-	return current_hours >= PHASE_SUNSET_END and current_hours < PHASE_BLUE_HOUR_END
-
-
-func get_day_phase() -> String:
-	if current_hours < PHASE_DAWN_START:
-		return "night"
-	if current_hours < PHASE_SUNRISE_START:
-		return "dawn"
-	if current_hours < PHASE_SUNRISE_END:
-		return "sunrise"
-	if current_hours < PHASE_MORNING_END:
-		return "morning"
-	if current_hours < PHASE_AFTERNOON_END:
-		return "afternoon"
-	if current_hours < PHASE_GOLDEN_HOUR_START:
-		return "late-afternoon"
-	if current_hours < PHASE_SUNSET_START:
-		return "golden-hour"
-	if current_hours < PHASE_SUNSET_END:
-		return "sunset"
-	if current_hours < PHASE_BLUE_HOUR_END:
-		return "blue-hour"
-	return "night"
-
-
-func get_sun_altitude_degrees() -> float:
-	# 6:00 → 0°, 12:00 → +90°, 18:00 → 0°, 0:00 → -90°.
-	var radians: float = (current_hours / 24.0) * TAU - PI * 0.5
-	return rad_to_deg(sin(radians) * PI * 0.5)
-
-
-# ---------------------------------------------------------------------------
-# Sun/Moon rotation & lighting
-# ---------------------------------------------------------------------------
-func _apply_sun_and_moon() -> void:
-	# Compute a unit celestial angle across 24 hours.
-	# We orient so that at 06:00 the sun is at the east horizon,
-	# at 12:00 straight up, at 18:00 at the west horizon,
-	# and at 00:00 straight down (below ground).
-	var fraction: float = current_hours / 24.0
-	# Offset so that noon aligns to straight up.
-	var angle: float = fraction * 360.0 - 90.0  # degrees
-	var sun_angle_deg: float = angle
-	var moon_angle_deg: float = angle + 180.0
+	_apply_sun_rotation(hour)
+	_apply_moon_rotation(hour)
 
 	if sun_light:
-		sun_light.rotation_degrees = Vector3(
-			sun_angle_deg,
-			north_offset_degrees,
-			tilt_degrees * sin(fraction * TAU),
-		)
-		var altitude: float = get_sun_altitude_degrees()
-		var day_factor: float = clamp((altitude + 6.0) / 20.0, 0.0, 1.0)
-		var tint: Color = _pick_sun_tint()
-		sun_light.light_color = tint
-		sun_light.light_energy = lerp(0.0, sun_max_energy, day_factor)
-		sun_light.shadow_enabled = day_factor > 0.05
-		sun_light.visible = day_factor > 0.0
+		var energy := kf["sun_energy"] as float
+		if sun_intensity_override >= 0.0:
+			energy = sun_intensity_override
+		if instant:
+			sun_light.light_energy = energy
+			sun_light.light_color = kf["sun_color"]
+		else:
+			sun_light.light_energy = lerpf(sun_light.light_energy, energy, 0.05)
+			sun_light.light_color  = (sun_light.light_color as Color).lerp(kf["sun_color"], 0.05)
+		sun_light.shadow_enabled = kf["sun_energy"] > 0.15
 
-	if moon_light:
-		moon_light.rotation_degrees = Vector3(
-			moon_angle_deg,
-			north_offset_degrees + 180.0,
-			-tilt_degrees * sin(fraction * TAU),
-		)
-		var moon_altitude: float = -get_sun_altitude_degrees()
-		var night_factor: float = clamp((moon_altitude + 2.0) / 20.0, 0.0, 1.0)
-		moon_light.light_color = moon_tint
-		moon_light.light_energy = lerp(0.0, moon_max_energy, night_factor)
-		moon_light.shadow_enabled = night_factor > 0.3
-		moon_light.visible = night_factor > 0.0
+	if moon_light and enable_moon:
+		var moon_energy := _compute_moon_energy(hour)
+		if moon_intensity_override >= 0.0:
+			moon_energy = moon_intensity_override
+		moon_light.light_energy = moon_energy
+		moon_light.shadow_enabled = moon_energy > 0.1
 
+	if sky_material:
+		if instant:
+			sky_material.sky_top_color       = kf["sky_top"]
+			sky_material.sky_horizon_color    = kf["sky_horizon"]
+			sky_material.ground_bottom_color  = kf["ground"]
+			sky_material.sky_energy_multiplier    = kf["sun_energy"] + kf["ambient"]
+			sky_material.ground_energy_multiplier = kf["ambient"] * 0.5
+		else:
+			sky_material.sky_top_color = (sky_material.sky_top_color as Color).lerp(kf["sky_top"], 0.03)
+			sky_material.sky_horizon_color = (sky_material.sky_horizon_color as Color).lerp(kf["sky_horizon"], 0.03)
+			sky_material.ground_bottom_color = (sky_material.ground_bottom_color as Color).lerp(kf["ground"], 0.03)
+			var target_energy := kf["sun_energy"] + kf["ambient"]
+			sky_material.sky_energy_multiplier = lerpf(sky_material.sky_energy_multiplier, target_energy, 0.03)
 
-func _pick_sun_tint() -> Color:
-	var phase: String = get_day_phase()
-	match phase:
-		"dawn", "sunrise":
-			return sun_tint_dawn
-		"golden-hour", "sunset":
-			return sun_tint_dusk
-		_:
-			return sun_tint_day
+	if world_environment and world_environment.environment:
+		var env := world_environment.environment
+		var target_ambient := kf["ambient"] as float
+		env.ambient_light_energy = lerpf(env.ambient_light_energy, target_ambient, 0.04 if not instant else 1.0)
 
+func _compute_moon_energy(hour: float) -> float:
+	var moon_angle := _compute_moon_angle_deg(hour)
+	var moon_above := sinf(deg_to_rad(moon_angle))
+	var phase_factor := float(moon_phase) / 7.0 * 0.18 + 0.02
+	return clampf(moon_above * phase_factor, 0.0, 0.2)
 
-# ---------------------------------------------------------------------------
-# Sky / environment
-# ---------------------------------------------------------------------------
-func _apply_sky_and_environment() -> void:
-	if world_environment == null or world_environment.environment == null:
+# ── Hour Events ───────────────────────────────────────────────────────────────
+
+func _check_hour_events() -> void:
+	var int_hour := int(current_hour)
+	if int_hour == previous_integer_hour:
 		return
-	var env: Environment = world_environment.environment
-	var pal: Dictionary = _sample_sky_palette(current_hours)
+	previous_integer_hour = int_hour
+	hour_changed.emit(int_hour)
 
-	# Push colors into procedural sky material if present.
-	if env.sky and env.sky.sky_material and env.sky.sky_material is ProceduralSkyMaterial:
-		var sm: ProceduralSkyMaterial = env.sky.sky_material
-		sm.sky_top_color = pal["top"]
-		sm.sky_horizon_color = pal["horizon"]
-		sm.ground_bottom_color = pal["ground"]
-		sm.ground_horizon_color = (pal["horizon"] as Color).darkened(0.25)
+	match int_hour:
+		0:
+			midnight.emit()
+		6:
+			sunrise.emit()
+			dawn_started.emit()
+		12:
+			noon.emit()
+		18:
+			sunset.emit()
+		19:
+			dusk_started.emit()
 
-	env.ambient_light_color = pal["ambient"]
-	env.ambient_light_energy = pal["ambient_energy"]
-	env.background_energy_multiplier = pal["sky_energy"]
-
-
-func _sample_sky_palette(h: float) -> Dictionary:
-	# Four anchor points: midnight (0), dawn (6), day (12), dusk (18).
-	# We cubically interpolate between them.
-	var h_norm: float = h / 24.0
-	var segment_size: float = 6.0
-
-	var anchors: Array = [
-		{"h": 0.0,  "top": color_midnight_top,  "horizon": color_midnight_horizon,  "ground": color_midnight_ground,  "ambient": Color(0.15, 0.18, 0.25), "ambient_energy": 0.08, "sky_energy": 0.15},
-		{"h": 6.0,  "top": color_dawn_top,      "horizon": color_dawn_horizon,      "ground": color_dawn_ground,      "ambient": Color(0.55, 0.45, 0.4),  "ambient_energy": 0.6,  "sky_energy": 0.6},
-		{"h": 12.0, "top": color_day_top,       "horizon": color_day_horizon,       "ground": color_day_ground,       "ambient": Color(0.6, 0.65, 0.78),  "ambient_energy": 1.0,  "sky_energy": 1.0},
-		{"h": 18.0, "top": color_dusk_top,      "horizon": color_dusk_horizon,      "ground": color_dusk_ground,      "ambient": Color(0.5, 0.32, 0.32),  "ambient_energy": 0.5,  "sky_energy": 0.7},
-		{"h": 24.0, "top": color_night_top,     "horizon": color_night_horizon,     "ground": color_night_ground,     "ambient": Color(0.12, 0.14, 0.22), "ambient_energy": 0.1,  "sky_energy": 0.2},
-	]
-
-	# Find the segment and fraction.
-	var a: Dictionary = anchors[0]
-	var b: Dictionary = anchors[1]
-	for i in range(anchors.size() - 1):
-		if h >= float(anchors[i]["h"]) and h <= float(anchors[i + 1]["h"]):
-			a = anchors[i]
-			b = anchors[i + 1]
-			break
-	var span: float = float(b["h"]) - float(a["h"])
-	var t: float = 0.0 if span <= 0.0 else (h - float(a["h"])) / span
-	t = smoothstep(0.0, 1.0, t)
-
-	return {
-		"top": (a["top"] as Color).lerp(b["top"], t),
-		"horizon": (a["horizon"] as Color).lerp(b["horizon"], t),
-		"ground": (a["ground"] as Color).lerp(b["ground"], t),
-		"ambient": (a["ambient"] as Color).lerp(b["ambient"], t),
-		"ambient_energy": lerp(float(a["ambient_energy"]), float(b["ambient_energy"]), t),
-		"sky_energy": lerp(float(a["sky_energy"]), float(b["sky_energy"]), t),
-	}
-
-
-# ---------------------------------------------------------------------------
-# Stars
-# ---------------------------------------------------------------------------
-func _apply_stars() -> void:
-	if star_field == null:
-		return
-	var altitude: float = get_sun_altitude_degrees()
-	var t: float = 0.0
-	if altitude <= star_fade_end_altitude_deg:
-		t = 1.0
-	elif altitude >= star_fade_start_altitude_deg:
-		t = 0.0
-	else:
-		var span: float = star_fade_start_altitude_deg - star_fade_end_altitude_deg
-		t = 1.0 - (altitude - star_fade_end_altitude_deg) / max(0.001, span)
-	t = clamp(t, 0.0, 1.0)
-
-	star_field.visible = t > 0.001
-	for child in star_field.get_children():
-		if child is MeshInstance3D:
-			var mi: MeshInstance3D = child
-			# Try to modulate the material's albedo alpha.
-			if mi.material_override is StandardMaterial3D:
-				var mat: StandardMaterial3D = mi.material_override
-				var c: Color = mat.albedo_color
-				c.a = t
-				mat.albedo_color = c
-			elif mi.material_override is ShaderMaterial:
-				var sm: ShaderMaterial = mi.material_override
-				# set_shader_parameter silently ignores unknown uniforms,
-				# so it is safe to call without introspecting the shader.
-				sm.set_shader_parameter("star_brightness", t)
-
-	if constellation_group and enable_constellations:
-		constellation_group.visible = t > 0.25
-		# Slight parallax-like rotation so the celestial dome spins slowly.
-		constellation_group.rotation_degrees.y += 0.02
-
-
-# ---------------------------------------------------------------------------
-# Phase event detection
-# ---------------------------------------------------------------------------
-func _check_phase_events() -> void:
-	var phase: String = get_day_phase()
-	if phase != _last_phase:
-		_last_phase = phase
-		emit_signal("day_phase_changed", phase)
-
-	var hr_int: int = int(floor(current_hours))
-	if hr_int != _last_hour_int:
-		_last_hour_int = hr_int
-		emit_signal("hour_changed", hr_int)
-		if hr_int == 0:
-			emit_signal("midnight_reached")
-		elif hr_int == 12:
-			emit_signal("noon_reached")
-
-	var sunrising: bool = current_hours >= PHASE_SUNRISE_START and current_hours < PHASE_SUNRISE_END
-	if sunrising and not _in_sunrise:
-		_in_sunrise = true
-		emit_signal("sunrise_started")
-	elif not sunrising and _in_sunrise:
-		_in_sunrise = false
-		emit_signal("sunrise_ended")
-
-	var sunsetting: bool = current_hours >= PHASE_SUNSET_START and current_hours < PHASE_SUNSET_END
-	if sunsetting and not _in_sunset:
-		_in_sunset = true
-		emit_signal("sunset_started")
-	elif not sunsetting and _in_sunset:
-		_in_sunset = false
-		emit_signal("sunset_ended")
-
-	var golden: bool = is_golden_hour()
-	if golden and not _in_golden:
-		_in_golden = true
-		emit_signal("golden_hour_started")
-	elif not golden and _in_golden:
-		_in_golden = false
-		emit_signal("golden_hour_ended")
-
-	var blue: bool = is_blue_hour()
-	if blue and not _in_blue:
-		_in_blue = true
-		emit_signal("blue_hour_started")
-	elif not blue and _in_blue:
-		_in_blue = false
-		emit_signal("blue_hour_ended")
-
-
-# ---------------------------------------------------------------------------
-# Street light / neon billboard coordination
-# ---------------------------------------------------------------------------
-func register_street_light(light_node: Node) -> void:
-	if light_node and not _registered_street_lights.has(light_node):
-		_registered_street_lights.append(light_node)
-
-
-func unregister_street_light(light_node: Node) -> void:
-	_registered_street_lights.erase(light_node)
-
-
-func register_neon(neon_node: Node) -> void:
-	if neon_node and not _registered_neons.has(neon_node):
-		_registered_neons.append(neon_node)
-
-
-func unregister_neon(neon_node: Node) -> void:
-	_registered_neons.erase(neon_node)
-
+# ── Street Light Automation ────────────────────────────────────────────────────
 
 func _update_street_lights() -> void:
-	var altitude: float = get_sun_altitude_degrees()
-	var desired: bool = altitude < 6.0  # Civil twilight threshold.
-	if desired == _street_lights_on:
+	if not enable_street_lights:
 		return
-	_street_lights_on = desired
-	emit_signal("street_lights_requested", desired)
-	_cleanup_registry(_registered_street_lights)
-	_cleanup_registry(_registered_neons)
-	for lamp in _registered_street_lights:
-		if lamp == null:
+	var should_be_on := _street_lights_should_be_on(current_hour)
+	if should_be_on == street_lights_enabled:
+		return
+	street_lights_enabled = should_be_on
+	_set_all_street_lights(should_be_on)
+	if should_be_on:
+		street_lights_on.emit()
+		if debug_time:
+			print("[DayNightCycle] Street lights ON at %.2f" % current_hour)
+	else:
+		street_lights_off.emit()
+		if debug_time:
+			print("[DayNightCycle] Street lights OFF at %.2f" % current_hour)
+
+func _street_lights_should_be_on(hour: float) -> bool:
+	if street_light_on_hour > street_light_off_hour:
+		return hour >= street_light_on_hour or hour < street_light_off_hour
+	else:
+		return hour >= street_light_on_hour and hour < street_light_off_hour
+
+func _set_all_street_lights(on: bool) -> void:
+	for light_node in street_lights:
+		if not is_instance_valid(light_node):
 			continue
-		if lamp.has_method("set_lit"):
-			lamp.call("set_lit", desired)
-		elif lamp.has_method("set_on"):
-			lamp.call("set_on", desired)
-		elif lamp is Light3D:
-			(lamp as Light3D).visible = desired
-	for neon in _registered_neons:
-		if neon == null:
+		if light_node.has_method("set_enabled"):
+			light_node.set_enabled(on)
 			continue
-		if neon.has_method("set_emission"):
-			neon.call("set_emission", 3.5 if desired else 1.0)
+		var light := light_node.find_child("OmniLight3D", true, false) as OmniLight3D
+		if not light:
+			light = light_node.find_child("SpotLight3D", true, false) as OmniLight3D
+		if light:
+			light.visible = on
 
+func refresh_street_lights() -> void:
+	_discover_street_lights()
 
-func _cleanup_registry(arr: Array) -> void:
-	var i: int = arr.size() - 1
-	while i >= 0:
-		if not is_instance_valid(arr[i]):
-			arr.remove_at(i)
-		i -= 1
+# ── Star Field ────────────────────────────────────────────────────────────────
 
+func _update_star_field(delta: float) -> void:
+	if not enable_stars or not sky_material:
+		return
+	star_twinkle_offset += delta * 0.5
+	var night_factor := _get_night_factor(current_hour)
+	if sky_material is ProceduralSkyMaterial:
+		var psm := sky_material as ProceduralSkyMaterial
+		var star_brightness := night_factor * (0.9 + sin(star_twinkle_offset * 2.3) * 0.05)
+		psm.sky_energy_multiplier = lerpf(psm.sky_energy_multiplier,
+			_compute_sky_energy(current_hour) + star_brightness * 0.12, 0.02)
 
-# ---------------------------------------------------------------------------
-# Network bridging
-# ---------------------------------------------------------------------------
-func sync_from_server(payload: Dictionary) -> void:
-	if payload.has("time"):
-		request_time(float(payload["time"]))
-	if payload.has("day_length"):
-		day_length_seconds = max(60.0, float(payload["day_length"]))
-	if payload.has("paused"):
-		pause_time = bool(payload["paused"])
+func _get_night_factor(hour: float) -> float:
+	if hour >= 21.0 or hour < 5.0:
+		return 1.0
+	if hour >= 5.0 and hour < 7.0:
+		return 1.0 - (hour - 5.0) / 2.0
+	if hour >= 19.0 and hour < 21.0:
+		return (hour - 19.0) / 2.0
+	return 0.0
 
+func _compute_sky_energy(hour: float) -> float:
+	var kf := _sample_sky_keyframe(hour)
+	return kf["sun_energy"] + kf["ambient"]
 
-# ---------------------------------------------------------------------------
-# Debug helpers
-# ---------------------------------------------------------------------------
-func dbg_info() -> Dictionary:
+# ── Aurora Borealis ────────────────────────────────────────────────────────────
+
+func _start_aurora() -> void:
+	aurora_active = true
+	aurora_duration_remaining = randf_range(180.0, 600.0)
+	aurora_intensity = 0.0
+	if debug_time:
+		print("[DayNightCycle] Aurora borealis starting! Duration: %.0fs" % aurora_duration_remaining)
+
+func _update_aurora(delta: float) -> void:
+	if not aurora_active:
+		return
+	aurora_duration_remaining -= delta
+	var fade_time := 30.0
+	if aurora_duration_remaining > fade_time:
+		aurora_intensity = minf(aurora_intensity + delta * 0.015, 1.0)
+	else:
+		aurora_intensity = maxf(aurora_intensity - delta * 0.02, 0.0)
+	if aurora_duration_remaining <= 0.0:
+		aurora_active = false
+		aurora_intensity = 0.0
+
+func get_aurora_intensity() -> float:
+	var night_factor := _get_night_factor(current_hour)
+	return aurora_intensity * night_factor
+
+func trigger_aurora_now(duration_seconds: float = 300.0) -> void:
+	aurora_active = true
+	aurora_duration_remaining = duration_seconds
+	aurora_intensity = 0.0
+
+# ── Utility / Queries ──────────────────────────────────────────────────────────
+
+func _smooth_step(t: float) -> float:
+	return t * t * (3.0 - 2.0 * t)
+
+func get_hour() -> float:
+	return current_hour
+
+func get_hour_string() -> String:
+	var h := int(current_hour)
+	var m := int(fmod(current_hour, 1.0) * 60.0)
+	var suffix := "AM" if h < 12 else "PM"
+	var display_h := h % 12
+	if display_h == 0:
+		display_h = 12
+	return "%02d:%02d %s" % [display_h, m, suffix]
+
+func get_time_24() -> String:
+	var h := int(current_hour)
+	var m := int(fmod(current_hour, 1.0) * 60.0)
+	return "%02d:%02d" % [h, m]
+
+func is_daytime() -> bool:
+	return current_hour >= 6.0 and current_hour < 19.0
+
+func is_nighttime() -> bool:
+	return not is_daytime()
+
+func is_golden_hour() -> bool:
+	return (current_hour >= 6.0 and current_hour <= 8.0) or \
+		   (current_hour >= 16.5 and current_hour <= 18.5)
+
+func is_sunrise() -> bool:
+	return current_hour >= 5.5 and current_hour < 7.5
+
+func is_sunset() -> bool:
+	return current_hour >= 17.5 and current_hour < 19.5
+
+func get_day_progress() -> float:
+	return current_hour / 24.0
+
+func get_sun_direction() -> Vector3:
+	if sun_light:
+		return -sun_light.global_transform.basis.z
+	return Vector3.DOWN
+
+func get_moon_direction() -> Vector3:
+	if moon_light:
+		return -moon_light.global_transform.basis.z
+	return Vector3.UP
+
+func set_time(hour: float, instant: bool = false) -> void:
+	current_hour = clampf(fmod(hour, 24.0), 0.0, 23.999)
+	if instant:
+		_apply_time_of_day(current_hour, true)
+
+func serialize() -> Dictionary:
 	return {
-		"time": get_time_string(),
-		"phase": get_day_phase(),
-		"altitude_deg": get_sun_altitude_degrees(),
-		"is_day": is_day(),
-		"street_lights": _street_lights_on,
-		"registered_lights": _registered_street_lights.size(),
-		"registered_neons": _registered_neons.size(),
+		"current_hour": current_hour,
+		"current_day": current_day,
+		"time_scale": time_scale,
+		"moon_phase": moon_phase,
+		"aurora_active": aurora_active,
+		"aurora_duration_remaining": aurora_duration_remaining,
+		"street_lights_enabled": street_lights_enabled,
 	}
 
+func deserialize(data: Dictionary) -> void:
+	if data.has("current_hour"):
+		set_time(data["current_hour"], true)
+	if data.has("current_day"):
+		current_day = data["current_day"]
+	if data.has("time_scale"):
+		time_scale = data["time_scale"]
+	if data.has("moon_phase"):
+		moon_phase = data["moon_phase"]
+	if data.has("aurora_active") and data["aurora_active"]:
+		aurora_active = true
+		aurora_duration_remaining = data.get("aurora_duration_remaining", 120.0)
 
-func dbg_skip_to_phase(phase_name: String) -> void:
-	match phase_name:
-		"midnight": set_time_hours(0.0)
-		"dawn": set_time_hours(5.0)
-		"sunrise": set_time_hours(6.0)
-		"morning": set_time_hours(9.0)
-		"noon": set_time_hours(12.0)
-		"afternoon": set_time_hours(15.0)
-		"golden-hour": set_time_hours(17.5)
-		"sunset": set_time_hours(18.75)
-		"blue-hour": set_time_hours(20.0)
-		"night": set_time_hours(22.0)
-		_: pass
+## Returns a status string for HUD.
+func get_status_string() -> String:
+	var time_str := get_hour_string()
+	var period := "Day" if is_daytime() else "Night"
+	if is_golden_hour():
+		period = "Golden Hour"
+	elif is_sunrise():
+		period = "Sunrise"
+	elif is_sunset():
+		period = "Sunset"
+	var aurora_str := " 🌌 Aurora!" if aurora_active and aurora_intensity > 0.3 else ""
+	return "🕐 %s  (%s)%s" % [time_str, period, aurora_str]
+
+## Returns the moon phase name.
+func get_moon_phase_name() -> String:
+	match moon_phase:
+		0: return "New Moon 🌑"
+		1: return "Waxing Crescent 🌒"
+		2: return "First Quarter 🌓"
+		3: return "Waxing Gibbous 🌔"
+		4: return "Full Moon 🌕"
+		5: return "Waning Gibbous 🌖"
+		6: return "Last Quarter 🌗"
+		7: return "Waning Crescent 🌘"
+	return "Unknown"
+
+## Advance moon phase each day.
+func advance_moon_phase() -> void:
+	moon_phase = (moon_phase + 1) % 8
+
+## Speed multiplier for time progression.
+func set_time_scale(scale: float) -> void:
+	time_scale = clampf(scale, 0.0, 100.0)
+
+## Add a street light node dynamically (e.g. procedurally placed).
+func register_street_light(light_node: Node) -> void:
+	if not street_lights.has(light_node):
+		street_lights.append(light_node)
+		if street_lights_enabled:
+			if light_node.has_method("set_enabled"):
+				light_node.set_enabled(true)

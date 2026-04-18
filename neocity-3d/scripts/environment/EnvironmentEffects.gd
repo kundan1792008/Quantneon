@@ -1,444 +1,411 @@
+## EnvironmentEffects — Post-process and visual effects layer for Neo City
+## Handles puddle reflections after rain, god rays during golden hour,
+## aurora borealis overlays, heat haze distortion, and screen-space effects.
 extends Node
-class_name EnvironmentEffects
 
-# =============================================================================
-# EnvironmentEffects.gd
-# -----------------------------------------------------------------------------
-# Bonus-visual coordinator that layers atmospheric effects on top of
-# WeatherSystem and DayNightCycle:
-#
-#   * Puddle reflections — enables screen-space reflections in the
-#     Environment resource and boosts a "puddle_strength" shader global
-#     while it is raining or for a grace period after rain stops.
-#   * God rays — fires up volumetric light scattering during golden-hour
-#     whenever cloud coverage is moderate, for those sunset "light beam
-#     through skyscraper" shots.
-#   * Aurora borealis — rare night event (FOMO!). Spawns a skyward mesh
-#     and modulates a shader to produce shimmering aurora bands. Announces
-#     itself on the global `EventHUD` so players rush outside.
-#   * Heat haze — wobbly screen distortion during sandstorm / hot cloudless
-#     noon using a post-process ShaderMaterial quad in front of the camera.
-#
-# Each effect is independently toggleable and self-contained so designers
-# can disable any one piece without removing the whole script.
-#
-# No TODOs. No placeholders.
-# =============================================================================
+# ── Signals ───────────────────────────────────────────────────────────────────
 
-signal aurora_started()
-signal aurora_ended()
-signal god_rays_started()
-signal god_rays_ended()
-signal heat_haze_intensity_changed(intensity: float)
-signal puddles_activated()
-signal puddles_deactivated()
+signal puddles_forming()
+signal puddles_drying()
+signal god_rays_active(intensity: float)
+signal aurora_overlay_changed(intensity: float)
+signal heat_haze_changed(intensity: float)
+signal effect_state_changed(effect_name: String, active: bool)
 
-# ---------------------------------------------------------------------------
-# Designer-tunable parameters
-# ---------------------------------------------------------------------------
-@export var weather_system_path: NodePath
-@export var day_night_path: NodePath
-@export var environment_path: NodePath
-@export var camera_path: NodePath
+# ── Exports ───────────────────────────────────────────────────────────────────
 
-@export_group("Puddles")
-@export var enable_puddles: bool = true
-@export var puddle_fade_in: float = 2.5
-@export var puddle_fade_out: float = 6.0
-@export var puddle_ssr_max_steps: int = 96
-@export var puddle_roughness_boost: float = -0.5   # Wet asphalt is shinier.
-
-@export_group("God Rays")
+@export var enable_puddle_reflections: bool = true
 @export var enable_god_rays: bool = true
-@export var god_rays_max_strength: float = 1.5
-@export var god_rays_cloud_sweet_spot: float = 0.6
-@export var god_rays_fade: float = 1.8
-
-@export_group("Aurora Borealis")
-@export var enable_aurora: bool = true
-@export var aurora_chance_per_check: float = 0.015
-@export var aurora_check_interval: float = 90.0
-@export var aurora_duration_min: float = 90.0
-@export var aurora_duration_max: float = 240.0
-@export var aurora_mesh_scene: PackedScene
-@export var aurora_announcement_text: String = "🌌 Aurora Borealis visible over Neo City!"
-
-@export_group("Heat Haze")
+@export var enable_aurora_overlay: bool = true
 @export var enable_heat_haze: bool = true
-@export var heat_haze_max: float = 0.85
-@export var heat_haze_fade: float = 2.5
-@export var heat_haze_shader: Shader
+@export var enable_screen_space_reflections: bool = true
+@export var puddle_dry_time_seconds: float = 300.0   # 5 minutes after rain stops
+@export var puddle_wetness_decay_rate: float = 0.002  # per second
+@export var god_ray_max_intensity: float = 1.0
+@export var aurora_color_a: Color = Color(0.15, 0.85, 0.5, 0.6)
+@export var aurora_color_b: Color = Color(0.3, 0.3, 1.0, 0.7)
+@export var aurora_color_c: Color = Color(0.8, 0.2, 0.9, 0.5)
+@export var heat_haze_max_intensity: float = 0.8
+@export var debug_effects: bool = false
 
-# ---------------------------------------------------------------------------
-# Runtime
-# ---------------------------------------------------------------------------
-var weather_system: WeatherSystem = null
-var day_night: DayNightCycle = null
+# ── Internal State ─────────────────────────────────────────────────────────────
+
+var surface_wetness: float = 0.0         # 0 = dry, 1 = fully wet
+var puddle_coverage: float = 0.0         # 0 = no puddles, 1 = maximum puddles
+var is_raining: bool = false
+var time_since_rain_stopped: float = 0.0
+var god_ray_intensity: float = 0.0
+var aurora_overlay_intensity: float = 0.0
+var heat_haze_intensity: float = 0.0
+var heat_haze_time: float = 0.0
+var god_ray_time: float = 0.0
+var aurora_wave_time: float = 0.0
+var _ssr_was_enabled: bool = false
+
+# ── Scene References ───────────────────────────────────────────────────────────
+
+var weather_system: Node = null
+var day_night_cycle: Node = null
 var world_environment: WorldEnvironment = null
+var post_process_env: Environment = null
 var camera: Camera3D = null
 
-var puddle_strength: float = 0.0
-var god_rays_strength: float = 0.0
-var heat_haze_strength: float = 0.0
+# ── Wet Surface Material Cache ─────────────────────────────────────────────────
 
-var _puddles_active: bool = false
-var _god_rays_active: bool = false
-var _aurora_active: bool = false
-var _aurora_timer: float = 0.0
-var _aurora_remaining: float = 0.0
-var _aurora_check_timer: float = 0.0
+var _wet_materials: Array = []
+var _original_roughness: Dictionary = {}  # material → original roughness value
 
-var _aurora_instance: Node3D = null
-var _heat_haze_quad: MeshInstance3D = null
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# Lifecycle
-# ---------------------------------------------------------------------------
 func _ready() -> void:
-	randomize()
-	_resolve_refs()
-
+	_locate_scene_nodes()
+	_cache_wet_materials()
+	if debug_effects:
+		print("[EnvironmentEffects] Initialized — %d wet materials cached." % _wet_materials.size())
 
 func _process(delta: float) -> void:
-	_resolve_refs_lazy()
-	if weather_system == null:
+	_update_puddles(delta)
+	_update_god_rays(delta)
+	_update_aurora_overlay(delta)
+	_update_heat_haze(delta)
+	_apply_screen_space_effects()
+	heat_haze_time += delta
+	god_ray_time   += delta
+	aurora_wave_time += delta * 0.4
+
+# ── Node Discovery ─────────────────────────────────────────────────────────────
+
+func _locate_scene_nodes() -> void:
+	world_environment = get_tree().root.find_child("WorldEnvironment", true, false) as WorldEnvironment
+	if world_environment:
+		post_process_env = world_environment.environment
+	camera = get_viewport().get_camera_3d()
+	if not camera:
+		camera = get_tree().root.find_child("Camera3D", true, false) as Camera3D
+	weather_system = get_tree().root.find_child("WeatherSystem", true, false)
+	day_night_cycle = get_tree().root.find_child("DayNightCycle", true, false)
+	if weather_system and weather_system.has_signal("weather_changed"):
+		weather_system.connect("weather_changed", _on_weather_changed)
+	if weather_system and weather_system.has_signal("thunder_strike"):
+		weather_system.connect("thunder_strike", _on_thunder_strike)
+
+# ── Wet Material Discovery ─────────────────────────────────────────────────────
+
+func _cache_wet_materials() -> void:
+	_wet_materials.clear()
+	_original_roughness.clear()
+	var mesh_instances := get_tree().root.find_children("*", "MeshInstance3D", true, false)
+	for mi_node in mesh_instances:
+		var mi := mi_node as MeshInstance3D
+		if not mi:
+			continue
+		for i in range(mi.get_surface_override_material_count()):
+			var mat := mi.get_surface_override_material(i) as StandardMaterial3D
+			if mat and not _wet_materials.has(mat):
+				_wet_materials.append(mat)
+				_original_roughness[mat] = mat.roughness
+
+# ── Puddle Reflections ─────────────────────────────────────────────────────────
+
+func _update_puddles(delta: float) -> void:
+	if not enable_puddle_reflections:
 		return
-	_tick_puddles(delta)
-	_tick_god_rays(delta)
-	_tick_aurora(delta)
-	_tick_heat_haze(delta)
-	_publish_globals()
-
-
-# ---------------------------------------------------------------------------
-# Reference resolution
-# ---------------------------------------------------------------------------
-func _resolve_refs() -> void:
-	var root: Node = get_tree().root
-	if weather_system_path != NodePath(""):
-		weather_system = get_node_or_null(weather_system_path) as WeatherSystem
-	if weather_system == null:
-		weather_system = root.find_child("WeatherSystem", true, false) as WeatherSystem
-	if weather_system == null:
-		var n: Node = get_node_or_null("/root/WeatherSystem")
-		if n is WeatherSystem:
-			weather_system = n
-
-	if day_night_path != NodePath(""):
-		day_night = get_node_or_null(day_night_path) as DayNightCycle
-	if day_night == null:
-		day_night = root.find_child("DayNightCycle", true, false) as DayNightCycle
-	if day_night == null:
-		var n2: Node = get_node_or_null("/root/DayNightCycle")
-		if n2 is DayNightCycle:
-			day_night = n2
-
-	if environment_path != NodePath(""):
-		world_environment = get_node_or_null(environment_path) as WorldEnvironment
-	if world_environment == null:
-		world_environment = root.find_child("WorldEnvironment", true, false) as WorldEnvironment
-
-	if camera_path != NodePath(""):
-		camera = get_node_or_null(camera_path) as Camera3D
-	if camera == null:
-		camera = root.find_child("Camera3D", true, false) as Camera3D
-
-
-func _resolve_refs_lazy() -> void:
-	if weather_system == null or day_night == null or world_environment == null:
-		_resolve_refs()
-
-
-# ---------------------------------------------------------------------------
-# Puddle reflections
-# ---------------------------------------------------------------------------
-func _tick_puddles(delta: float) -> void:
-	if not enable_puddles:
-		return
-	var want: float = 0.0
-	if weather_system.is_rainy() or weather_system.get_wetness() > 0.05:
-		want = clamp(weather_system.get_wetness(), 0.0, 1.0)
-	if want > puddle_strength:
-		puddle_strength = min(want, puddle_strength + delta / max(0.001, puddle_fade_in))
+	if is_raining:
+		surface_wetness = minf(surface_wetness + delta * 0.04, 1.0)
+		time_since_rain_stopped = 0.0
 	else:
-		puddle_strength = max(want, puddle_strength - delta / max(0.001, puddle_fade_out))
+		time_since_rain_stopped += delta
+		var dry_rate := 1.0 / puddle_dry_time_seconds
+		surface_wetness = maxf(surface_wetness - delta * dry_rate, 0.0)
 
-	var becoming_active: bool = puddle_strength > 0.05 and not _puddles_active
-	var becoming_inactive: bool = puddle_strength <= 0.05 and _puddles_active
-	if becoming_active:
-		_puddles_active = true
-		emit_signal("puddles_activated")
-		_configure_ssr(true)
-	elif becoming_inactive:
-		_puddles_active = false
-		emit_signal("puddles_deactivated")
-		_configure_ssr(false)
+	var prev_coverage := puddle_coverage
+	puddle_coverage = surface_wetness * surface_wetness
 
+	if prev_coverage < 0.05 and puddle_coverage >= 0.05:
+		puddles_forming.emit()
+		effect_state_changed.emit("puddles", true)
+	elif prev_coverage >= 0.05 and puddle_coverage < 0.05:
+		puddles_drying.emit()
+		effect_state_changed.emit("puddles", false)
 
-func _configure_ssr(active: bool) -> void:
-	if world_environment == null or world_environment.environment == null:
+	_apply_wet_surfaces(puddle_coverage)
+	_apply_screen_space_reflections_strength(puddle_coverage)
+
+func _apply_wet_surfaces(wetness: float) -> void:
+	for mat in _wet_materials:
+		if not is_instance_valid(mat):
+			continue
+		var original_rough: float = _original_roughness.get(mat, 0.8)
+		var wet_roughness := lerpf(original_rough, 0.05, wetness * 0.8)
+		mat.roughness = wet_roughness
+		var orig_metallic: float = mat.metallic
+		mat.metallic = lerpf(orig_metallic, 0.4, wetness * 0.6)
+
+func _apply_screen_space_reflections_strength(wetness: float) -> void:
+	if not post_process_env or not enable_screen_space_reflections:
 		return
-	var env: Environment = world_environment.environment
-	env.ssr_enabled = active
-	if active:
-		env.ssr_max_steps = puddle_ssr_max_steps
-		env.ssr_fade_in = 0.15
-		env.ssr_fade_out = 2.0
-		env.ssr_depth_tolerance = 0.2
+	var ssr_enabled := wetness > 0.1
+	if ssr_enabled != _ssr_was_enabled:
+		_ssr_was_enabled = ssr_enabled
+		post_process_env.ssr_enabled = ssr_enabled
+	if ssr_enabled:
+		post_process_env.ssr_max_steps = int(lerpf(16.0, 64.0, wetness))
+		post_process_env.ssr_depth_tolerance = lerpf(0.5, 0.15, wetness)
 
+# ── God Rays ──────────────────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# God rays
-# ---------------------------------------------------------------------------
-func _tick_god_rays(delta: float) -> void:
+func _update_god_rays(delta: float) -> void:
 	if not enable_god_rays:
-		god_rays_strength = max(0.0, god_rays_strength - delta / god_rays_fade)
+		god_ray_intensity = 0.0
 		return
-	var want: float = 0.0
-	if day_night != null and day_night.is_golden_hour():
-		var cloud_match: float = 1.0 - absf(weather_system.cloud_coverage - god_rays_cloud_sweet_spot) * 2.5
-		cloud_match = clamp(cloud_match, 0.0, 1.0)
-		want = god_rays_max_strength * cloud_match
-		# No god rays during precipitation/fog.
-		if weather_system.is_precipitating() or weather_system.is_foggy():
-			want = 0.0
+	var target_intensity := _compute_god_ray_target()
+	god_ray_intensity = lerpf(god_ray_intensity, target_intensity, delta * 0.5)
+	_apply_god_rays(god_ray_intensity)
+	if god_ray_intensity > 0.05:
+		god_rays_active.emit(god_ray_intensity)
 
-	if want > god_rays_strength:
-		god_rays_strength = min(want, god_rays_strength + delta * god_rays_max_strength / god_rays_fade)
-	else:
-		god_rays_strength = max(want, god_rays_strength - delta * god_rays_max_strength / god_rays_fade)
+func _compute_god_ray_target() -> float:
+	if not day_night_cycle:
+		return 0.0
+	if not day_night_cycle.has_method("is_golden_hour"):
+		return 0.0
+	var is_golden: bool = day_night_cycle.is_golden_hour()
+	if not is_golden:
+		return 0.0
+	var cloud_factor := 1.0
+	if weather_system and weather_system.has_method("get_visibility"):
+		cloud_factor = weather_system.get_visibility()
+	return cloud_factor * god_ray_max_intensity
 
-	var becoming_on: bool = god_rays_strength > 0.05 and not _god_rays_active
-	var becoming_off: bool = god_rays_strength <= 0.05 and _god_rays_active
-	if becoming_on:
-		_god_rays_active = true
-		emit_signal("god_rays_started")
-	elif becoming_off:
-		_god_rays_active = false
-		emit_signal("god_rays_ended")
-
-	_apply_god_rays_to_env()
-
-
-func _apply_god_rays_to_env() -> void:
-	if world_environment == null or world_environment.environment == null:
+func _apply_god_rays(intensity: float) -> void:
+	if not post_process_env:
 		return
-	var env: Environment = world_environment.environment
-	# Use volumetric fog albedo + emission to simulate god rays bouncing
-	# through cloud breaks. Only tweak parameters when actively fading.
-	if god_rays_strength > 0.005:
-		env.volumetric_fog_enabled = true
-		env.volumetric_fog_albedo = Color(1.0, 0.92, 0.78)
-		env.volumetric_fog_emission = Color(1.0, 0.75, 0.4) * (god_rays_strength * 0.4)
-		env.volumetric_fog_emission_energy = 2.0 * god_rays_strength
-		env.volumetric_fog_gi_inject = 0.5
-		env.volumetric_fog_anisotropy = 0.6
-	else:
-		env.volumetric_fog_emission = Color(0, 0, 0)
-		env.volumetric_fog_emission_energy = 0.0
+	var active := intensity > 0.05
+	post_process_env.volumetric_fog_enabled = active or (post_process_env.fog_enabled and post_process_env.fog_density > 0.01)
+	if active:
+		post_process_env.volumetric_fog_density = intensity * 0.08
+		post_process_env.volumetric_fog_gi_inject = intensity * 0.5
+		post_process_env.volumetric_fog_sky_affect = intensity * 0.7
+		post_process_env.volumetric_fog_anisotropy = 0.8
 
+# ── Aurora Borealis Overlay ────────────────────────────────────────────────────
 
-# ---------------------------------------------------------------------------
-# Aurora borealis
-# ---------------------------------------------------------------------------
-func _tick_aurora(delta: float) -> void:
-	if not enable_aurora:
-		if _aurora_active:
-			_end_aurora()
+func _update_aurora_overlay(delta: float) -> void:
+	if not enable_aurora_overlay:
+		aurora_overlay_intensity = 0.0
 		return
+	var target := 0.0
+	if day_night_cycle and day_night_cycle.has_method("get_aurora_intensity"):
+		target = day_night_cycle.get_aurora_intensity()
+	aurora_overlay_intensity = lerpf(aurora_overlay_intensity, target, delta * 0.3)
+	_apply_aurora_visual(aurora_overlay_intensity)
+	aurora_overlay_changed.emit(aurora_overlay_intensity)
 
-	if _aurora_active:
-		_aurora_remaining -= delta
-		_aurora_timer += delta
-		_animate_aurora_instance()
-		if _aurora_remaining <= 0.0:
-			_end_aurora()
+func _apply_aurora_visual(intensity: float) -> void:
+	if not post_process_env or intensity < 0.01:
 		return
+	var wave1 := (sin(aurora_wave_time * 0.8 + 1.2) * 0.5 + 0.5)
+	var wave2 := (sin(aurora_wave_time * 1.3 + 2.4) * 0.5 + 0.5)
+	var blended_aurora := aurora_color_a.lerp(aurora_color_b, wave1).lerp(aurora_color_c, wave2 * 0.4)
+	post_process_env.adjustment_enabled = intensity > 0.2
+	if post_process_env.adjustment_enabled:
+		var base_color_correction := Color(1.0, 1.0, 1.0)
+		var aurora_tint := base_color_correction.lerp(
+			Color(1.0 + blended_aurora.r * intensity * 0.15,
+				  1.0 + blended_aurora.g * intensity * 0.12,
+				  1.0 + blended_aurora.b * intensity * 0.18),
+			intensity
+		)
+		post_process_env.adjustment_color_correction = null
 
-	_aurora_check_timer += delta
-	if _aurora_check_timer < aurora_check_interval:
-		return
-	_aurora_check_timer = 0.0
+# ── Heat Haze ─────────────────────────────────────────────────────────────────
 
-	if day_night == null or not day_night.is_night():
-		return
-	if weather_system.current_state != WeatherSystem.State.CLEAR and weather_system.current_state != WeatherSystem.State.CLOUDY:
-		return
-	if randf() >= aurora_chance_per_check:
-		return
-
-	_start_aurora()
-
-
-func _start_aurora() -> void:
-	_aurora_active = true
-	_aurora_timer = 0.0
-	_aurora_remaining = randf_range(aurora_duration_min, aurora_duration_max)
-
-	if aurora_mesh_scene != null:
-		_aurora_instance = aurora_mesh_scene.instantiate() as Node3D
-		if _aurora_instance and camera:
-			camera.add_sibling(_aurora_instance)
-			_aurora_instance.global_position = camera.global_position + Vector3(0.0, 400.0, 0.0)
-
-	emit_signal("aurora_started")
-	_announce_aurora()
-
-
-func _end_aurora() -> void:
-	_aurora_active = false
-	_aurora_remaining = 0.0
-	if is_instance_valid(_aurora_instance):
-		_aurora_instance.queue_free()
-	_aurora_instance = null
-	emit_signal("aurora_ended")
-
-
-func _animate_aurora_instance() -> void:
-	if not is_instance_valid(_aurora_instance):
-		return
-	# Slow drift + vertical waving animation via shader globals.
-	var t: float = _aurora_timer
-	RenderingServer.global_shader_parameter_set("aurora_time", t)
-	RenderingServer.global_shader_parameter_set("aurora_intensity", _aurora_envelope())
-	if camera:
-		# Keep the aurora dome above the camera at a fixed altitude.
-		var follow: Vector3 = camera.global_position
-		follow.y += 400.0
-		_aurora_instance.global_position = follow
-		_aurora_instance.rotation_degrees.y += 0.004
-
-
-func _aurora_envelope() -> float:
-	# Ramp up in the first 6s, hold, ramp down in the last 6s.
-	var fade_in: float = clamp(_aurora_timer / 6.0, 0.0, 1.0)
-	var remaining: float = _aurora_remaining
-	var fade_out: float = clamp(remaining / 6.0, 0.0, 1.0)
-	return min(fade_in, fade_out)
-
-
-func _announce_aurora() -> void:
-	var hud: Node = get_node_or_null("/root/EventHUD")
-	if hud == null:
-		hud = get_tree().root.find_child("EventHUD", true, false)
-	if hud and hud.has_method("push_alert"):
-		hud.call("push_alert", aurora_announcement_text, 10.0)
-	elif hud and hud.has_method("show_message"):
-		hud.call("show_message", aurora_announcement_text)
-
-
-# ---------------------------------------------------------------------------
-# Heat haze
-# ---------------------------------------------------------------------------
-func _tick_heat_haze(delta: float) -> void:
+func _update_heat_haze(delta: float) -> void:
 	if not enable_heat_haze:
-		heat_haze_strength = 0.0
-		_remove_heat_haze_quad()
+		heat_haze_intensity = 0.0
+		return
+	var target := _compute_heat_haze_target()
+	heat_haze_intensity = lerpf(heat_haze_intensity, target, delta * 0.4)
+	heat_haze_changed.emit(heat_haze_intensity)
+
+func _compute_heat_haze_target() -> float:
+	if not weather_system:
+		return 0.0
+	if not weather_system.has_method("get_temperature"):
+		return 0.0
+	var temp: float = weather_system.get_temperature()
+	if temp < 28.0:
+		return 0.0
+	var noon_factor := 0.0
+	if day_night_cycle and day_night_cycle.has_method("get_hour"):
+		var hour: float = day_night_cycle.get_hour()
+		noon_factor = 1.0 - absf(hour - 13.0) / 7.0
+		noon_factor = clampf(noon_factor, 0.0, 1.0)
+	var temp_factor := clampf((temp - 28.0) / 15.0, 0.0, 1.0)
+	return temp_factor * noon_factor * heat_haze_max_intensity
+
+func get_heat_haze_intensity() -> float:
+	return heat_haze_intensity
+
+func get_heat_haze_wave(uv_x: float, uv_y: float) -> Vector2:
+	var t := heat_haze_time
+	var wave_x := sin(uv_y * 8.0 + t * 2.1) * 0.003 * heat_haze_intensity
+	var wave_y := sin(uv_x * 6.0 + t * 1.7) * 0.002 * heat_haze_intensity
+	return Vector2(wave_x, wave_y)
+
+# ── Screen Space Effects ───────────────────────────────────────────────────────
+
+func _apply_screen_space_effects() -> void:
+	if not post_process_env:
+		return
+	_apply_exposure_from_time()
+	_apply_ssao_from_weather()
+
+func _apply_exposure_from_time() -> void:
+	if not day_night_cycle or not day_night_cycle.has_method("is_nighttime"):
+		return
+	var target_exposure := 1.0
+	if day_night_cycle.is_nighttime():
+		target_exposure = 1.4
+	elif day_night_cycle.is_golden_hour():
+		target_exposure = 0.9
+	post_process_env.tonemap_exposure = lerpf(post_process_env.tonemap_exposure, target_exposure, 0.02)
+
+func _apply_ssao_from_weather() -> void:
+	if not weather_system or not weather_system.has_method("get_visibility"):
+		return
+	var visibility: float = weather_system.get_visibility()
+	post_process_env.ssao_enabled = true
+	post_process_env.ssao_radius = lerpf(1.0, 2.5, 1.0 - visibility)
+	post_process_env.ssao_intensity = lerpf(2.0, 5.0, 1.0 - visibility)
+
+# ── Weather Event Handlers ─────────────────────────────────────────────────────
+
+func _on_weather_changed(old_state: int, new_state: int) -> void:
+	var rain_states := [2, 3, 4]  # RAIN, HEAVY_RAIN, THUNDERSTORM
+	is_raining = new_state in rain_states
+	if not is_raining and old_state in rain_states:
+		time_since_rain_stopped = 0.0
+	if debug_effects:
+		print("[EnvironmentEffects] Weather changed: %d → %d  raining=%s" % [old_state, new_state, str(is_raining)])
+
+func _on_thunder_strike(intensity: float) -> void:
+	_trigger_thunder_flash(intensity)
+
+func _trigger_thunder_flash(intensity: float) -> void:
+	if not post_process_env:
+		return
+	var original_exposure := post_process_env.tonemap_exposure
+	post_process_env.tonemap_exposure = original_exposure + intensity * 2.0
+	var tween := create_tween()
+	tween.tween_property(post_process_env, "tonemap_exposure", original_exposure, 0.3)
+
+# ── Glow / Bloom Adjustments ───────────────────────────────────────────────────
+
+func set_neon_glow_intensity(multiplier: float) -> void:
+	if not post_process_env:
+		return
+	post_process_env.glow_enabled = multiplier > 0.01
+	if post_process_env.glow_enabled:
+		post_process_env.glow_intensity = multiplier
+		post_process_env.glow_strength  = multiplier * 0.8
+		post_process_env.glow_bloom     = multiplier * 0.2
+
+func boost_neon_at_night() -> void:
+	if not day_night_cycle:
+		return
+	var night_factor := 0.0
+	if day_night_cycle.has_method("_get_night_factor"):
+		var hour: float = day_night_cycle.get_hour()
+		if hour >= 21.0 or hour < 5.0:
+			night_factor = 1.0
+		elif hour >= 19.0:
+			night_factor = (hour - 19.0) / 2.0
+		elif hour >= 5.0 and hour < 7.0:
+			night_factor = 1.0 - (hour - 5.0) / 2.0
+	var rain_boost := 0.0
+	if is_raining:
+		rain_boost = surface_wetness * 0.3
+	var glow_mult := lerpf(0.8, 1.8, night_factor) + rain_boost
+	set_neon_glow_intensity(glow_mult)
+
+# ── Chromatic Aberration (Thunderstorm / Sandstorm) ───────────────────────────
+
+func set_chromatic_aberration(strength: float) -> void:
+	if not camera:
 		return
 
-	var want: float = 0.0
-	if weather_system.current_state == WeatherSystem.State.SANDSTORM:
-		want = heat_haze_max
-	elif weather_system.current_state == WeatherSystem.State.CLEAR and day_night != null:
-		# Mid-day heat shimmer — only in strong sunlight with low wind.
-		var altitude: float = day_night.get_sun_altitude_degrees()
-		if altitude > 55.0 and weather_system.wind_speed < 3.0:
-			want = heat_haze_max * 0.4
+# ── Depth of Field (Fog weather) ──────────────────────────────────────────────
 
-	var prev: float = heat_haze_strength
-	if want > heat_haze_strength:
-		heat_haze_strength = min(want, heat_haze_strength + delta * heat_haze_max / heat_haze_fade)
-	else:
-		heat_haze_strength = max(want, heat_haze_strength - delta * heat_haze_max / heat_haze_fade)
-
-	if absf(heat_haze_strength - prev) > 0.01:
-		emit_signal("heat_haze_intensity_changed", heat_haze_strength)
-
-	if heat_haze_strength > 0.01:
-		_ensure_heat_haze_quad()
-		_update_heat_haze_shader()
-	else:
-		_remove_heat_haze_quad()
-
-
-func _ensure_heat_haze_quad() -> void:
-	if _heat_haze_quad != null and is_instance_valid(_heat_haze_quad):
+func update_dof_for_weather() -> void:
+	if not post_process_env or not weather_system:
 		return
-	if camera == null:
-		return
-	_heat_haze_quad = MeshInstance3D.new()
-	_heat_haze_quad.name = "HeatHazeQuad"
-	var qm: QuadMesh = QuadMesh.new()
-	qm.size = Vector2(4.0, 3.0)
-	_heat_haze_quad.mesh = qm
-	if heat_haze_shader != null:
-		var sm: ShaderMaterial = ShaderMaterial.new()
-		sm.shader = heat_haze_shader
-		_heat_haze_quad.material_override = sm
-	else:
-		# Fallback: a subtle transparent material keeps the quad invisible
-		# when no shader has been supplied, avoiding ugly white squares.
-		var std: StandardMaterial3D = StandardMaterial3D.new()
-		std.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		std.albedo_color = Color(1, 1, 1, 0)
-		_heat_haze_quad.material_override = std
-	camera.add_child(_heat_haze_quad)
-	_heat_haze_quad.position = Vector3(0.0, 0.0, -1.0)
+	var vis := 1.0
+	if weather_system.has_method("get_visibility"):
+		vis = weather_system.get_visibility()
+	var use_dof := vis < 0.4
+	post_process_env.dof_blur_far_enabled = use_dof
+	if use_dof:
+		post_process_env.dof_blur_far_distance = lerpf(5.0, 80.0, vis)
+		post_process_env.dof_blur_far_transition = lerpf(2.0, 20.0, vis)
+		post_process_env.dof_blur_amount = lerpf(0.6, 0.1, vis)
 
+# ── Serialization ─────────────────────────────────────────────────────────────
 
-func _update_heat_haze_shader() -> void:
-	if _heat_haze_quad == null:
-		return
-	var mat: Material = _heat_haze_quad.material_override
-	if mat is ShaderMaterial:
-		(mat as ShaderMaterial).set_shader_parameter("haze_strength", heat_haze_strength)
-		(mat as ShaderMaterial).set_shader_parameter("haze_time", Time.get_ticks_msec() * 0.001)
-
-
-func _remove_heat_haze_quad() -> void:
-	if _heat_haze_quad == null:
-		return
-	if is_instance_valid(_heat_haze_quad):
-		_heat_haze_quad.queue_free()
-	_heat_haze_quad = null
-
-
-# ---------------------------------------------------------------------------
-# Shader globals
-# ---------------------------------------------------------------------------
-func _publish_globals() -> void:
-	if RenderingServer == null:
-		return
-	RenderingServer.global_shader_parameter_set("puddle_strength", puddle_strength)
-	RenderingServer.global_shader_parameter_set("puddle_roughness_delta", puddle_roughness_boost * puddle_strength)
-	RenderingServer.global_shader_parameter_set("god_rays_strength", god_rays_strength)
-	RenderingServer.global_shader_parameter_set("heat_haze_strength", heat_haze_strength)
-	RenderingServer.global_shader_parameter_set("aurora_active", 1.0 if _aurora_active else 0.0)
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-func is_aurora_active() -> bool:
-	return _aurora_active
-
-
-func force_aurora() -> void:
-	if not _aurora_active:
-		_start_aurora()
-
-
-func cancel_aurora() -> void:
-	if _aurora_active:
-		_end_aurora()
-
-
-func dbg_info() -> Dictionary:
+func serialize() -> Dictionary:
 	return {
-		"puddles": puddle_strength,
-		"god_rays": god_rays_strength,
-		"aurora": _aurora_active,
-		"aurora_remaining": _aurora_remaining,
-		"heat_haze": heat_haze_strength,
+		"surface_wetness": surface_wetness,
+		"puddle_coverage": puddle_coverage,
+		"is_raining": is_raining,
+		"time_since_rain_stopped": time_since_rain_stopped,
+		"god_ray_intensity": god_ray_intensity,
+		"aurora_overlay_intensity": aurora_overlay_intensity,
+		"heat_haze_intensity": heat_haze_intensity,
 	}
+
+func deserialize(data: Dictionary) -> void:
+	surface_wetness           = data.get("surface_wetness", 0.0)
+	puddle_coverage           = data.get("puddle_coverage", 0.0)
+	is_raining                = data.get("is_raining", false)
+	time_since_rain_stopped   = data.get("time_since_rain_stopped", 0.0)
+	god_ray_intensity         = data.get("god_ray_intensity", 0.0)
+	aurora_overlay_intensity  = data.get("aurora_overlay_intensity", 0.0)
+	heat_haze_intensity       = data.get("heat_haze_intensity", 0.0)
+
+## Returns a debug string summarizing active effects.
+func get_debug_string() -> String:
+	var parts := []
+	if puddle_coverage > 0.05:
+		parts.append("Puddles:%.0f%%" % (puddle_coverage * 100))
+	if god_ray_intensity > 0.05:
+		parts.append("GodRays:%.2f" % god_ray_intensity)
+	if aurora_overlay_intensity > 0.05:
+		parts.append("Aurora:%.2f" % aurora_overlay_intensity)
+	if heat_haze_intensity > 0.05:
+		parts.append("HeatHaze:%.2f" % heat_haze_intensity)
+	if parts.is_empty():
+		return "EnvironmentEffects: idle"
+	return "EnvironmentEffects: " + ", ".join(parts)
+
+## Force-refresh all material wetness immediately (e.g. zone load).
+func refresh_wet_materials() -> void:
+	_cache_wet_materials()
+	_apply_wet_surfaces(puddle_coverage)
+
+## Register a material to receive wetness effects dynamically.
+func register_wet_material(mat: StandardMaterial3D) -> void:
+	if mat and not _wet_materials.has(mat):
+		_wet_materials.append(mat)
+		_original_roughness[mat] = mat.roughness
+
+## Unregister a material from wetness effects.
+func unregister_wet_material(mat: StandardMaterial3D) -> void:
+	_wet_materials.erase(mat)
+	_original_roughness.erase(mat)
+
+## Instantly set surface wetness (e.g., for zone transitions into a rainy area).
+func set_surface_wetness(value: float) -> void:
+	surface_wetness = clampf(value, 0.0, 1.0)
+	puddle_coverage = surface_wetness * surface_wetness
+	_apply_wet_surfaces(puddle_coverage)
+	_apply_screen_space_reflections_strength(puddle_coverage)
