@@ -124,7 +124,7 @@ func create_instant_listing(config: Dictionary, perf: Dictionary, price: int, ti
 	return id
 
 func create_auction_listing(config: Dictionary, perf: Dictionary, opening_bid: int, duration_sec: int = DEFAULT_AUCTION_DURATION_SEC, title: String = "", description: String = "", tags: Array = []) -> String:
-	if opening_bid < 0:
+	if opening_bid <= 0:
 		return ""
 	if _listings_owned_by(local_user_id).size() >= MAX_LISTINGS_PER_SELLER:
 		return ""

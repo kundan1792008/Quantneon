@@ -499,11 +499,9 @@ func spider_chart_points() -> Array:
 	var speed_norm: float = clamp((s.top_speed_kmh - 180.0) / (380.0 - 180.0), 0.0, 1.0)
 	var handling_norm: float = clamp(s.handling_index, 0.0, 1.0)
 	# Lower brake distance is better — invert.
-	var brake_norm: float = clamp(1.0 - (s.braking_distance_100_0_m / BASE_STATS.braking_distance_100_0_m), 0.0, 1.0) + 0.25
-	brake_norm = clamp(brake_norm, 0.0, 1.0)
+	var brake_norm: float = clamp(1.0 - (s.braking_distance_100_0_m / BASE_STATS.braking_distance_100_0_m) + 0.25, 0.0, 1.0)
 	# Lower accel time is better — invert.
-	var accel_norm: float = clamp(1.0 - (s.acceleration_0_100_s / BASE_STATS.acceleration_0_100_s), 0.0, 1.0) + 0.25
-	accel_norm = clamp(accel_norm, 0.0, 1.0)
+	var accel_norm: float = clamp(1.0 - (s.acceleration_0_100_s / BASE_STATS.acceleration_0_100_s) + 0.25, 0.0, 1.0)
 	var nitro_norm: float = clamp((s.nitro_duration_s - 2.5) / (7.5 - 2.5), 0.0, 1.0)
 	return [speed_norm, handling_norm, brake_norm, accel_norm, nitro_norm]
 

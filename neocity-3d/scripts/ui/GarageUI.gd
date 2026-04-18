@@ -63,6 +63,8 @@ const CAMERA_MAX_DISTANCE: float = 9.0
 const CAMERA_MIN_PITCH: float = -0.3
 const CAMERA_MAX_PITCH: float = 1.2
 
+const AUCTION_DURATION_24H_SEC: int = 86400
+
 ## -----------------------------------------------------------------------------
 ## Exported fields
 ## -----------------------------------------------------------------------------
@@ -863,7 +865,7 @@ func _build_marketplace_panel() -> Control:
 				_customizer.export_configuration(),
 				_performance.export_state(),
 				int(price_edit.value),
-				86400,
+				AUCTION_DURATION_24H_SEC,
 				title_edit.text,
 			)
 			_switch_tab(TAB_MARKETPLACE))
