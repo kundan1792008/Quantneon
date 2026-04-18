@@ -658,6 +658,3 @@ func tick(delta: float) -> void:
 	# Trim old gossip entries beyond window.
 	var cutoff: float = now - GOSSIP_DEDUPE_WINDOW_SECS * 4.0
 	_recent_gossip_log = _recent_gossip_log.filter(func(r): return float(r["at_unix"]) >= cutoff)
-	# delta currently unused past the above — referenced for API stability.
-	if delta < 0.0:
-		pass

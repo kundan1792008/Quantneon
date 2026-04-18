@@ -25,6 +25,7 @@ const PRICE_MOD_FLOOR: float = 0.5
 const PRICE_MOD_CEIL: float = 3.0
 const DEMAND_MULT_MIN: float = 1.0
 const DEMAND_MULT_MAX: float = 2.0
+const DEMAND_PLAYER_CAP: int = 20
 const NIGHT_PREMIUM: float = 0.15
 const ILLEGAL_RISK_PREMIUM: float = 0.5
 
@@ -186,8 +187,8 @@ func set_world_is_night(is_night: bool) -> void:
 
 func _demand_multiplier_for(district_id: String) -> float:
 	var count: int = int(_district_player_counts.get(district_id, 0))
-	# 0 players -> 1.0, 20+ players -> 2.0, linear in between.
-	var m: float = 1.0 + (float(min(count, 20)) / 20.0)
+	# 0 players -> 1.0, DEMAND_PLAYER_CAP+ players -> 2.0, linear in between.
+	var m: float = 1.0 + (float(min(count, DEMAND_PLAYER_CAP)) / float(DEMAND_PLAYER_CAP))
 	return clamp(m, DEMAND_MULT_MIN, DEMAND_MULT_MAX)
 
 

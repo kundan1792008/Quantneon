@@ -20,6 +20,7 @@ extends Node
 
 const NPCBrain = preload("res://scripts/ai/NPCBrain.gd")
 const NPCDialogue = preload("res://scripts/ai/NPCDialogue.gd")
+const _NPCEconomyScript = preload("res://scripts/ai/NPCEconomy.gd")
 
 signal npc_spawned(npc_id: String, district_id: String)
 signal npc_despawned(npc_id: String, reason: String)
@@ -53,6 +54,7 @@ const DISTRICT_CORP: String = "corp"
 
 const _DAWN_HOUR: float = 6.0
 const _DUSK_HOUR: float = 20.0
+const _DUSK_DESPAWN_RATIO: float = 0.4
 
 # ── Configuration ─────────────────────────────────────────────────────
 
@@ -112,13 +114,11 @@ func _resolve_economy() -> void:
 	else:
 		# Fall back to a local child instance so the spawner works standalone
 		# in isolated test scenes that don't configure the autoload.
-		var script: Resource = load("res://scripts/ai/NPCEconomy.gd")
-		if script != null:
-			var inst: Node = Node.new()
-			inst.set_script(script)
-			inst.name = "NPCEconomyLocal"
-			add_child(inst)
-			_economy = inst
+		var inst: Node = Node.new()
+		inst.set_script(_NPCEconomyScript)
+		inst.name = "NPCEconomyLocal"
+		add_child(inst)
+		_economy = inst
 
 
 # ── District registry ─────────────────────────────────────────────────
@@ -756,9 +756,9 @@ func _dusk_thin_out() -> void:
 			var rec: Dictionary = _npcs[nid]
 			if String(rec["district_id"]) == String(id) and String(rec["spawn_kind"]) == "permanent":
 				ids_here.append(nid)
-		# Shuffle and despawn ~40%.
+		# Shuffle and despawn the configured dusk ratio.
 		ids_here.shuffle()
-		var cull: int = int(round(float(ids_here.size()) * 0.4))
+		var cull: int = int(round(float(ids_here.size()) * _DUSK_DESPAWN_RATIO))
 		for i in range(cull):
 			despawn(String(ids_here[i]), "dusk")
 
