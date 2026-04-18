@@ -45,6 +45,8 @@ BuildingDecaySystem="*res://scripts/BuildingDecaySystem.gd"
 LandOwnershipUI="*res://ui/land_ownership_ui.tscn"
 RentEconomyUI="*res://ui/rent_economy_ui.tscn"
 CityLeaderboardUI="*res://ui/city_leaderboard_ui.tscn"
+NPCEconomy="*res://scripts/ai/NPCEconomy.gd"
+NPCSpawner="*res://scripts/services/NPCSpawner.gd"
 
 [display]
 
