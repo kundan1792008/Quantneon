@@ -1,363 +1,724 @@
-## TerritoryWar — Faction vs. Faction territory control warfare.
+## TerritoryWar.gd
+## ----------------------------------------------------------------------------
+## 48-hour faction-vs-faction war engine for territory control in Neo City.
 ##
-## Mechanics:
-##   • Declare war on an adjacent territory (costs WAR_DECLARATION_COST tokens).
-##   • War lasts WAR_DURATION_SECS (48 hours).  Resolved server-side.
-##   • Activity score = buildings_built * 10 + player_time_minutes + mini_game_wins * 50.
-##   • Winner captures the territory; loser's buildings enter a "damaged" visual state.
-##   • After a war the zone enters a ceasefire for CEASEFIRE_DURATION_SECS (72 hours).
-##   • Live scores are pushed by the server every SCORE_UPDATE_INTERVAL seconds.
+## Design highlights (issue #14):
+##   * Any faction may DECLARE war against an *adjacent* territory controlled
+##     by another faction. Declaring costs 1,000 Quant tokens pulled from the
+##     declaring faction's treasury.
+##   * A war runs for a fixed 48 hours. The side with the higher activity
+##     score inside the contested zone at the deadline wins.
+##   * Activity score = (buildings built * BUILDING_WEIGHT)
+##                    + (minutes spent in zone * PRESENCE_WEIGHT)
+##                    + (mini-game wins * MINIGAME_WEIGHT).
+##   * Winner captures the territory; loser's buildings in the zone are
+##     flagged as "damaged" (visual state consumed by BuildingDecaySystem).
+##   * A 72-hour cease-fire prevents either side from re-declaring until it
+##     elapses.
 ##
-## Autoloaded as /root/TerritoryWar.
+## This service is intended to be registered as an autoload singleton.
+## ----------------------------------------------------------------------------
 
 extends Node
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Tunable constants
+# ---------------------------------------------------------------------------
+const WAR_DURATION_SECONDS: int = 48 * 60 * 60
+const CEASEFIRE_DURATION_SECONDS: int = 72 * 60 * 60
+const DECLARE_WAR_COST: int = 1000                       # Quant tokens
+const MIN_WAR_PARTICIPANTS_PER_SIDE: int = 2             # forfeits otherwise
+const MAX_CONCURRENT_WARS_PER_FACTION: int = 2
+const TICK_INTERVAL_SECONDS: float = 10.0                # scheduler tick
+const PRESENCE_SAMPLE_SECONDS: int = 60                  # aggregate granularity
+const BUILDING_WEIGHT: int = 50
+const PRESENCE_WEIGHT: int = 5                           # per minute
+const MINIGAME_WEIGHT: int = 120
 
-## Quant-token cost to declare war on an adjacent zone.
-const WAR_DECLARATION_COST: int = 1000
+# War states
+enum WarState {
+	PENDING = 0,
+	ACTIVE = 1,
+	ENDED = 2,
+	CANCELLED = 3,
+	FORFEITED = 4,
+}
 
-## War duration in seconds (48 hours).
-const WAR_DURATION_SECS: int = 48 * 3600
+# Outcomes of `declare_war`
+enum DeclareResult {
+	OK,
+	NOT_ADJACENT,
+	TARGET_NOT_OWNED,
+	SELF_ATTACK,
+	INSUFFICIENT_FUNDS,
+	ALREADY_AT_WAR,
+	CEASEFIRE_ACTIVE,
+	TOO_MANY_WARS,
+	TERRITORY_NOT_FOUND,
+	FACTION_NOT_FOUND,
+	NOT_AUTHORISED,
+}
 
-## Ceasefire period in seconds after a war resolves (72 hours).
-const CEASEFIRE_DURATION_SECS: int = 72 * 3600
 
-## Maximum number of simultaneous active wars a single faction may participate in.
-const MAX_ACTIVE_WARS_PER_FACTION: int = 2
+# ---------------------------------------------------------------------------
+# Signals
+# ---------------------------------------------------------------------------
+signal war_declared(war_id: String, attacker_id: String, defender_id: String, zone_id: String)
+signal war_started(war_id: String)
+signal war_tick(war_id: String, attacker_score: int, defender_score: int, seconds_remaining: int)
+signal war_ended(war_id: String, winner_id: String, loser_id: String, zone_id: String)
+signal war_forfeited(war_id: String, forfeiting_faction: String)
+signal ceasefire_started(faction_a: String, faction_b: String, zone_id: String, expires_at: int)
+signal ceasefire_expired(faction_a: String, faction_b: String, zone_id: String)
+signal territory_captured(zone_id: String, new_owner: String, previous_owner: String)
 
-## Activity score weights.
-const SCORE_WEIGHT_BUILDING: int  = 10   # points per building constructed
-const SCORE_WEIGHT_TIME_MIN: int  = 1    # points per player-minute in zone
-const SCORE_WEIGHT_MINI_GAME: int = 50   # points per mini-game win in zone
 
-## Server push interval (seconds) for live score updates.
-const SCORE_UPDATE_INTERVAL: float = 60.0
+# ---------------------------------------------------------------------------
+# Internal data classes
+# ---------------------------------------------------------------------------
+class Territory:
+	var id: String
+	var display_name: String
+	var district_id: String
+	var owner_faction_id: String = ""
+	var neighbours: Array = []            # ids of adjacent zones
+	var building_value: int = 0
+	var protected_until: int = 0          # newly-captured grace period
 
-# ── War status constants ───────────────────────────────────────────────────────
+	func _init(p_id: String = "", p_name: String = "", p_district: String = "") -> void:
+		id = p_id
+		display_name = p_name
+		district_id = p_district
 
-const WAR_STATUS_ACTIVE:    String = "active"
-const WAR_STATUS_CEASEFIRE: String = "ceasefire"
-const WAR_STATUS_RESOLVED:  String = "resolved"
+	func is_neighbour(other_id: String) -> bool:
+		return neighbours.has(other_id)
 
-# ── Signals ───────────────────────────────────────────────────────────────────
+	func to_dict() -> Dictionary:
+		return {
+			"id": id,
+			"display_name": display_name,
+			"district_id": district_id,
+			"owner_faction_id": owner_faction_id,
+			"neighbours": neighbours.duplicate(),
+			"building_value": building_value,
+			"protected_until": protected_until,
+		}
 
-## Emitted when a new war is declared (either our faction or another in the district).
-signal war_declared(war_data: Dictionary)
 
-## Emitted every score update for an active war.
-signal war_scores_updated(war_id: String, attacker_score: int, defender_score: int)
+class ActivityLedger:
+	var buildings_built: int = 0
+	var mini_game_wins: int = 0
+	var presence_seconds: int = 0
+	var last_presence_ts: int = 0
 
-## Emitted when a war concludes and a winner is determined.
-signal war_resolved(war_id: String, winner_faction_id: String, loser_faction_id: String)
+	func score() -> int:
+		var minutes: int = int(floor(presence_seconds / 60.0))
+		return (buildings_built * BUILDING_WEIGHT) \
+			 + (minutes * PRESENCE_WEIGHT) \
+			 + (mini_game_wins * MINIGAME_WEIGHT)
 
-## Emitted when a ceasefire begins on a zone.
-signal ceasefire_started(zone_id: String, expires_unix: int)
+	func to_dict() -> Dictionary:
+		return {
+			"buildings_built": buildings_built,
+			"mini_game_wins": mini_game_wins,
+			"presence_seconds": presence_seconds,
+			"score": score(),
+		}
 
-## Emitted when a ceasefire expires and the zone can be contested again.
-signal ceasefire_ended(zone_id: String)
 
-## Emitted when zone ownership changes (territory captured).
-signal territory_captured(zone_id: String, new_owner_faction_id: String, prev_owner_faction_id: String)
+class War:
+	var id: String
+	var attacker_id: String
+	var defender_id: String
+	var zone_id: String
+	var state: int = WarState.PENDING
+	var started_at: int = 0
+	var ends_at: int = 0
+	var attacker_ledger: ActivityLedger = ActivityLedger.new()
+	var defender_ledger: ActivityLedger = ActivityLedger.new()
+	var participant_count: Dictionary = {}  # faction_id -> Dictionary(player_id -> last_ts)
+	var event_log: Array = []               # list of Dictionaries
+	var winner_id: String = ""
+	var loser_id: String = ""
 
-## Emitted when loser buildings enter damaged visual state after a war.
-signal buildings_damaged(zone_id: String, faction_id: String)
+	func _init(p_id: String = "", p_attacker: String = "", p_defender: String = "", p_zone: String = "") -> void:
+		id = p_id
+		attacker_id = p_attacker
+		defender_id = p_defender
+		zone_id = p_zone
 
-# ── State ─────────────────────────────────────────────────────────────────────
+	func seconds_remaining(now: int) -> int:
+		return max(0, ends_at - now)
 
-## All known active / recently resolved wars keyed by war_id.
-## Each war dict has:
-##   war_id, attacker_faction_id, defender_faction_id, zone_id,
-##   declared_unix, expires_unix, status, attacker_score, defender_score.
-var active_wars: Dictionary = {}  # {war_id: Dictionary}
+	func is_participant(faction_id: String) -> bool:
+		return faction_id == attacker_id or faction_id == defender_id
 
-## Zone ceasefire registry.  {zone_id: ceasefire_expires_unix}
-var ceasefires: Dictionary = {}
+	func ledger_for(faction_id: String) -> ActivityLedger:
+		if faction_id == attacker_id:
+			return attacker_ledger
+		if faction_id == defender_id:
+			return defender_ledger
+		return null
 
-## Zone ownership registry. {zone_id: faction_id | ""}
-var zone_owners: Dictionary = {}
+	func to_dict(now: int) -> Dictionary:
+		return {
+			"id": id,
+			"attacker_id": attacker_id,
+			"defender_id": defender_id,
+			"zone_id": zone_id,
+			"state": state,
+			"started_at": started_at,
+			"ends_at": ends_at,
+			"seconds_remaining": seconds_remaining(now),
+			"attacker": attacker_ledger.to_dict(),
+			"defender": defender_ledger.to_dict(),
+			"winner_id": winner_id,
+			"loser_id": loser_id,
+		}
 
-## Known adjacent zone relationships. {zone_id: [adjacent_zone_id, ...]}
-var zone_adjacency: Dictionary = {}
 
-## Local countdown timers for wars we are tracking (seconds remaining).
-var _war_timers: Dictionary = {}  # {war_id: float}
+class Ceasefire:
+	var faction_a: String
+	var faction_b: String
+	var zone_id: String
+	var expires_at: int
 
-## Socket reference.
-var _socket: Node = null
+	func _init(a: String = "", b: String = "", z: String = "", exp: int = 0) -> void:
+		faction_a = a
+		faction_b = b
+		zone_id = z
+		expires_at = exp
 
-# ── Lifecycle ─────────────────────────────────────────────────────────────────
+	func involves(faction_id: String) -> bool:
+		return faction_id == faction_a or faction_id == faction_b
 
+
+# ---------------------------------------------------------------------------
+# Runtime state
+# ---------------------------------------------------------------------------
+var _territories: Dictionary = {}          # zone_id -> Territory
+var _wars: Dictionary = {}                 # war_id  -> War
+var _active_wars_by_zone: Dictionary = {}  # zone_id -> war_id
+var _ceasefires: Array = []                # [Ceasefire]
+var _presence: Dictionary = {}             # player_id -> Dictionary(zone_id, faction_id, since_ts)
+var _next_war_index: int = 1
+var _tick_timer: Timer
+var _faction_manager: Node = null
+
+
+# ---------------------------------------------------------------------------
+# Engine lifecycle
+# ---------------------------------------------------------------------------
 func _ready() -> void:
-	_resolve_socket()
-	print("[TerritoryWar] Ready.")
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	_tick_timer = Timer.new()
+	_tick_timer.wait_time = TICK_INTERVAL_SECONDS
+	_tick_timer.one_shot = false
+	_tick_timer.autostart = true
+	add_child(_tick_timer)
+	_tick_timer.timeout.connect(_on_tick)
+	_faction_manager = _resolve_faction_manager()
+	print("[TerritoryWar] Service initialised.")
 
-func _process(delta: float) -> void:
-	_tick_war_timers(delta)
-	_tick_ceasefire_timers()
 
-# ── Socket helpers ─────────────────────────────────────────────────────────────
+func _resolve_faction_manager() -> Node:
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return null
+	var root: Node = tree.root
+	if root != null and root.has_node("FactionManager"):
+		return root.get_node("FactionManager")
+	return null
 
-func _resolve_socket() -> void:
-	_socket = get_node_or_null("/root/SocketIOClient")
-	if _socket == null:
-		get_tree().create_timer(1.0).timeout.connect(_resolve_socket)
+
+# ---------------------------------------------------------------------------
+# Territory registration API — called by the city generator at load time.
+# ---------------------------------------------------------------------------
+func register_territory(
+	zone_id: String,
+	display_name: String,
+	district_id: String,
+	neighbours: Array = [],
+	initial_owner: String = "",
+	building_value: int = 0,
+) -> void:
+	var t: Territory = Territory.new(zone_id, display_name, district_id)
+	t.neighbours = neighbours.duplicate()
+	t.owner_faction_id = initial_owner
+	t.building_value = building_value
+	_territories[zone_id] = t
+
+
+func set_neighbours(zone_id: String, neighbours: Array) -> void:
+	var t: Territory = _territories.get(zone_id, null)
+	if t == null:
 		return
-	_socket.on_event("war_declared",      _on_war_declared)
-	_socket.on_event("war_score_update",  _on_war_score_update)
-	_socket.on_event("war_resolved",      _on_war_resolved)
-	_socket.on_event("ceasefire_update",  _on_ceasefire_update)
-	_socket.on_event("zone_ownership",    _on_zone_ownership)
-	_socket.on_event("territory_update",  _on_territory_update_compat)
-	_socket.on_event("war_state_sync",    _on_war_state_sync)
-	print("[TerritoryWar] Socket events registered.")
+	t.neighbours = neighbours.duplicate()
 
-func _emit(event: String, payload: Dictionary) -> void:
-	if _socket == null:
-		push_warning("[TerritoryWar] Cannot emit '%s' — socket unavailable." % event)
+
+func set_territory_owner(zone_id: String, faction_id: String) -> void:
+	var t: Territory = _territories.get(zone_id, null)
+	if t == null:
 		return
-	_socket.send_event(event, payload)
+	var previous: String = t.owner_faction_id
+	t.owner_faction_id = faction_id
+	if previous != faction_id:
+		emit_signal("territory_captured", zone_id, faction_id, previous)
 
-# ── Public API: War declaration ────────────────────────────────────────────────
 
-## Attempt to declare war on the given zone from the attacker faction.
-## Requires the zone to be adjacent to a zone already owned by the attacker.
-## Costs WAR_DECLARATION_COST Quant tokens (validated server-side).
-func declare_war(attacker_faction_id: String, target_zone_id: String) -> void:
-	if _is_zone_in_ceasefire(target_zone_id):
-		push_warning("[TerritoryWar] Zone '%s' is in ceasefire." % target_zone_id)
-		return
-	if _count_active_wars_for_faction(attacker_faction_id) >= MAX_ACTIVE_WARS_PER_FACTION:
-		push_warning("[TerritoryWar] Faction already at max active wars (%d)." % MAX_ACTIVE_WARS_PER_FACTION)
-		return
-	_emit("declare_war", {
-		"attacker_faction_id": attacker_faction_id,
-		"zone_id":             target_zone_id
-	})
+func get_territory(zone_id: String) -> Territory:
+	return _territories.get(zone_id, null)
 
-## Forfeit an active war. The declaring faction loses the zone and forfeits the fee.
-func forfeit_war(war_id: String, faction_id: String) -> void:
-	if not active_wars.has(war_id):
-		push_warning("[TerritoryWar] Unknown war_id: %s" % war_id)
-		return
-	_emit("war_forfeit", {"war_id": war_id, "faction_id": faction_id})
 
-# ── Public API: Queries ────────────────────────────────────────────────────────
+func get_territories_for_faction(faction_id: String) -> Array:
+	var out: Array = []
+	for t in _territories.values():
+		if (t as Territory).owner_faction_id == faction_id:
+			out.append(t)
+	return out
 
-## Returns the active war dict for a zone, or empty dict if no active war.
-func get_war_for_zone(zone_id: String) -> Dictionary:
-	for war in active_wars.values():
-		if war.get("zone_id", "") == zone_id and war.get("status", "") == WAR_STATUS_ACTIVE:
-			return war
-	return {}
 
-## Returns all wars (active + ceasefire phase) involving a given faction.
-func get_wars_for_faction(faction_id: String) -> Array:
-	var result: Array = []
-	for war in active_wars.values():
-		if war.get("attacker_faction_id", "") == faction_id \
-		or war.get("defender_faction_id", "") == faction_id:
-			result.append(war)
-	return result
+func get_all_territories() -> Array:
+	return _territories.values()
 
-## Returns true if the given zone is currently under ceasefire.
-func is_zone_in_ceasefire(zone_id: String) -> bool:
-	return _is_zone_in_ceasefire(zone_id)
 
-## Returns seconds until the ceasefire for zone_id expires, or 0 if no ceasefire.
-func ceasefire_seconds_remaining(zone_id: String) -> int:
-	if not ceasefires.has(zone_id):
-		return 0
-	var now: int = int(Time.get_unix_time_from_system())
-	return max(0, ceasefires[zone_id] - now)
+# ---------------------------------------------------------------------------
+# Declaring / cancelling wars
+# ---------------------------------------------------------------------------
+func declare_war(
+	attacker_faction_id: String,
+	zone_id: String,
+	acting_player_id: String,
+) -> Dictionary:
+	var target: Territory = _territories.get(zone_id, null)
+	if target == null:
+		return _res(DeclareResult.TERRITORY_NOT_FOUND, "Unknown territory.")
+	if target.owner_faction_id.is_empty():
+		return _res(DeclareResult.TARGET_NOT_OWNED, "Target zone is not owned.")
+	if target.owner_faction_id == attacker_faction_id:
+		return _res(DeclareResult.SELF_ATTACK, "Cannot attack your own land.")
 
-## Returns seconds until the war expires (client-side estimate), or 0 if not active.
-func war_seconds_remaining(war_id: String) -> int:
-	if not active_wars.has(war_id):
-		return 0
-	var war: Dictionary = active_wars[war_id]
-	var now: int = int(Time.get_unix_time_from_system())
-	return max(0, int(war.get("expires_unix", 0)) - now)
+	var attacker = _get_faction(attacker_faction_id)
+	if attacker == null:
+		return _res(DeclareResult.FACTION_NOT_FOUND, "Attacker faction missing.")
+	# Only leader / officers can declare.
+	if _faction_manager != null and not _faction_has_war_authority(attacker, acting_player_id):
+		return _res(DeclareResult.NOT_AUTHORISED, "Only officers or leader may declare.")
 
-## Returns the current activity score for a faction in the given war.
-func get_score(war_id: String, faction_id: String) -> int:
-	if not active_wars.has(war_id):
-		return 0
-	var war: Dictionary = active_wars[war_id]
-	if faction_id == war.get("attacker_faction_id", ""):
-		return int(war.get("attacker_score", 0))
-	if faction_id == war.get("defender_faction_id", ""):
-		return int(war.get("defender_score", 0))
-	return 0
+	# Attacker must own at least one adjacent zone.
+	var has_adjacent_ownership: bool = false
+	for neighbour_id in target.neighbours:
+		var n: Territory = _territories.get(neighbour_id, null)
+		if n != null and n.owner_faction_id == attacker_faction_id:
+			has_adjacent_ownership = true
+			break
+	if not has_adjacent_ownership:
+		return _res(DeclareResult.NOT_ADJACENT,
+			"You must own a zone adjacent to the target.")
 
-## Returns the faction ID currently owning the given zone, or "" if neutral.
-func get_zone_owner(zone_id: String) -> String:
-	return zone_owners.get(zone_id, "")
+	# Respect ceasefires.
+	if _is_ceasefire_active(attacker_faction_id, target.owner_faction_id, zone_id):
+		return _res(DeclareResult.CEASEFIRE_ACTIVE, "A ceasefire is still in effect.")
 
-## Returns a formatted human-readable time string (HH:MM:SS) for remaining seconds.
-func format_time_remaining(total_secs: int) -> String:
-	var h: int = total_secs / 3600
-	var m: int = (total_secs % 3600) / 60
-	var s: int = total_secs % 60
-	return "%02d:%02d:%02d" % [h, m, s]
+	# Already a war going in this zone?
+	if _active_wars_by_zone.has(zone_id):
+		return _res(DeclareResult.ALREADY_AT_WAR, "Zone already has an active war.")
 
-# ── Public API: Score contribution ────────────────────────────────────────────
+	if _count_active_wars_for(attacker_faction_id) >= MAX_CONCURRENT_WARS_PER_FACTION:
+		return _res(DeclareResult.TOO_MANY_WARS, "Your faction has too many active wars.")
 
-## Notify the server about a new activity contribution for a war zone.
-## activity_type: "building_built" | "player_time" | "mini_game_win"
-## value: number of buildings, minutes, or wins.
-func report_activity(war_id: String, faction_id: String, activity_type: String, value: int) -> void:
-	_emit("war_activity", {
-		"war_id":        war_id,
-		"faction_id":    faction_id,
-		"activity_type": activity_type,
-		"value":         value
-	})
+	# Charge the attacker.
+	if _faction_manager != null:
+		if attacker.treasury < DECLARE_WAR_COST:
+			return _res(DeclareResult.INSUFFICIENT_FUNDS,
+				"Need %d Quant tokens in treasury." % DECLARE_WAR_COST)
+		attacker.treasury -= DECLARE_WAR_COST
+		_faction_manager.emit_signal("treasury_changed", attacker.id, attacker.treasury)
 
-## Calculate an activity score contribution locally (for display purposes only).
-## Server is authoritative.
-func calculate_score_contribution(buildings_built: int, player_minutes: int, mini_game_wins: int) -> int:
-	return (buildings_built * SCORE_WEIGHT_BUILDING) \
-		 + (player_minutes  * SCORE_WEIGHT_TIME_MIN) \
-		 + (mini_game_wins  * SCORE_WEIGHT_MINI_GAME)
+	# Instantiate war.
+	var war_id: String = _generate_war_id()
+	var war: War = War.new(war_id, attacker_faction_id, target.owner_faction_id, zone_id)
+	war.state = WarState.ACTIVE
+	war.started_at = Time.get_unix_time_from_system()
+	war.ends_at = war.started_at + WAR_DURATION_SECONDS
+	war.event_log.append(_make_event("declared", {
+		"attacker": attacker_faction_id,
+		"defender": target.owner_faction_id,
+	}))
+	_wars[war_id] = war
+	_active_wars_by_zone[zone_id] = war_id
 
-# ── Socket event handlers ──────────────────────────────────────────────────────
+	emit_signal("war_declared", war_id, attacker_faction_id,
+		target.owner_faction_id, zone_id)
+	emit_signal("war_started", war_id)
 
-func _on_war_declared(data: Dictionary) -> void:
-	var war_id: String = data.get("war_id", "")
-	if war_id == "":
-		return
-	var war: Dictionary = {
-		"war_id":               war_id,
-		"attacker_faction_id":  data.get("attacker_faction_id", ""),
-		"defender_faction_id":  data.get("defender_faction_id", ""),
-		"zone_id":              data.get("zone_id", ""),
-		"declared_unix":        int(data.get("declared_unix", 0)),
-		"expires_unix":         int(data.get("expires_unix", 0)),
-		"status":               WAR_STATUS_ACTIVE,
-		"attacker_score":       0,
-		"defender_score":       0
-	}
-	active_wars[war_id] = war
-	_war_timers[war_id] = float(war_seconds_remaining(war_id))
-	emit_signal("war_declared", war)
-	print("[TerritoryWar] War declared: zone=%s att=%s def=%s" % [
-		war["zone_id"], war["attacker_faction_id"], war["defender_faction_id"]])
+	var res: Dictionary = _res(DeclareResult.OK, "War declared.")
+	res["war_id"] = war_id
+	return res
 
-func _on_war_score_update(data: Dictionary) -> void:
-	var war_id: String = data.get("war_id", "")
-	if not active_wars.has(war_id):
-		return
-	var war: Dictionary = active_wars[war_id]
-	war["attacker_score"] = int(data.get("attacker_score", 0))
-	war["defender_score"] = int(data.get("defender_score", 0))
-	active_wars[war_id] = war
-	emit_signal("war_scores_updated", war_id, war["attacker_score"], war["defender_score"])
 
-func _on_war_resolved(data: Dictionary) -> void:
-	var war_id: String          = data.get("war_id", "")
-	var winner_id: String       = data.get("winner_faction_id", "")
-	var loser_id: String        = data.get("loser_faction_id", "")
-	var zone_id: String         = data.get("zone_id", "")
-	var ceasefire_exp: int      = int(data.get("ceasefire_expires_unix", 0))
-
-	if active_wars.has(war_id):
-		active_wars[war_id]["status"] = WAR_STATUS_RESOLVED
-
-	# Update ownership
-	if zone_id != "" and winner_id != "":
-		var prev_owner: String = zone_owners.get(zone_id, "")
-		zone_owners[zone_id] = winner_id
-		emit_signal("territory_captured", zone_id, winner_id, prev_owner)
-		emit_signal("buildings_damaged", zone_id, loser_id)
-
-	# Register ceasefire
-	if ceasefire_exp > 0 and zone_id != "":
-		ceasefires[zone_id] = ceasefire_exp
-		emit_signal("ceasefire_started", zone_id, ceasefire_exp)
-
-	emit_signal("war_resolved", war_id, winner_id, loser_id)
-	_war_timers.erase(war_id)
-	print("[TerritoryWar] War resolved: winner=%s loser=%s zone=%s" % [winner_id, loser_id, zone_id])
-
-func _on_ceasefire_update(data: Dictionary) -> void:
-	var zone_id: String   = data.get("zone_id", "")
-	var expires_unix: int = int(data.get("expires_unix", 0))
-	if zone_id == "":
-		return
-	if expires_unix == 0:
-		ceasefires.erase(zone_id)
-		emit_signal("ceasefire_ended", zone_id)
-	else:
-		ceasefires[zone_id] = expires_unix
-		emit_signal("ceasefire_started", zone_id, expires_unix)
-
-func _on_zone_ownership(data: Dictionary) -> void:
-	var zone_id: String   = data.get("zone_id", "")
-	var faction_id: String = data.get("faction_id", "")
-	if zone_id == "":
-		return
-	var prev: String = zone_owners.get(zone_id, "")
-	zone_owners[zone_id] = faction_id
-	if prev != faction_id:
-		emit_signal("territory_captured", zone_id, faction_id, prev)
-
-func _on_territory_update_compat(data: Dictionary) -> void:
-	## Compatibility shim for the legacy "territory_update" event already handled
-	## by NetworkManager.  We just keep our local ownership table in sync.
-	var zone_id: String   = data.get("zoneId", data.get("zone_id", ""))
-	var faction_id: String = data.get("faction", data.get("faction_id", ""))
-	if zone_id != "":
-		zone_owners[zone_id] = faction_id
-
-func _on_war_state_sync(data: Dictionary) -> void:
-	## Full war-state bulk sync from server (e.g., after reconnect).
-	var wars: Array      = data.get("wars", [])
-	var cf_list: Array   = data.get("ceasefires", [])
-	var owners: Array    = data.get("zone_owners", [])
-	active_wars.clear()
-	for w in wars:
-		var wid: String = w.get("war_id", "")
-		if wid != "":
-			active_wars[wid] = w
-			if w.get("status", "") == WAR_STATUS_ACTIVE:
-				_war_timers[wid] = float(war_seconds_remaining(wid))
-	for cf in cf_list:
-		var zid: String = cf.get("zone_id", "")
-		if zid != "":
-			ceasefires[zid] = int(cf.get("expires_unix", 0))
-	for o in owners:
-		var zid: String = o.get("zone_id", "")
-		if zid != "":
-			zone_owners[zid] = o.get("faction_id", "")
-
-# ── Internal helpers ───────────────────────────────────────────────────────────
-
-func _is_zone_in_ceasefire(zone_id: String) -> bool:
-	if not ceasefires.has(zone_id):
+func cancel_war(war_id: String, acting_faction_id: String, acting_player_id: String) -> bool:
+	var w: War = _wars.get(war_id, null)
+	if w == null or w.state != WarState.ACTIVE:
 		return false
-	var now: int = int(Time.get_unix_time_from_system())
-	return ceasefires[zone_id] > now
+	if acting_faction_id != w.attacker_id:
+		return false
+	var f = _get_faction(acting_faction_id)
+	if f != null and not _faction_has_war_authority(f, acting_player_id):
+		return false
+	# Cancellation forfeits the war to the defender (no refund, per design).
+	_end_war(w, w.defender_id, w.attacker_id, WarState.CANCELLED)
+	return true
 
-func _count_active_wars_for_faction(faction_id: String) -> int:
-	var count: int = 0
-	for war in active_wars.values():
-		if war.get("status", "") == WAR_STATUS_ACTIVE:
-			if war.get("attacker_faction_id", "") == faction_id \
-			or war.get("defender_faction_id", "") == faction_id:
-				count += 1
-	return count
 
-func _tick_war_timers(delta: float) -> void:
-	for war_id in _war_timers.keys():
-		_war_timers[war_id] = max(0.0, _war_timers[war_id] - delta)
+# ---------------------------------------------------------------------------
+# Activity ingestion API — called by the rest of the game
+# ---------------------------------------------------------------------------
+func register_player_enter_zone(
+	player_id: String,
+	faction_id: String,
+	zone_id: String,
+) -> void:
+	var now: int = Time.get_unix_time_from_system()
+	var prior: Dictionary = _presence.get(player_id, {})
+	if prior.has("zone_id") and prior["zone_id"] != zone_id:
+		# Commit time accrued in the prior zone first.
+		_commit_presence(player_id, prior, now)
+	_presence[player_id] = {
+		"zone_id": zone_id,
+		"faction_id": faction_id,
+		"since_ts": now,
+	}
 
-func _tick_ceasefire_timers() -> void:
-	var now: int = int(Time.get_unix_time_from_system())
-	var expired: Array = []
-	for zone_id in ceasefires:
-		if ceasefires[zone_id] <= now:
-			expired.append(zone_id)
-	for zone_id in expired:
-		ceasefires.erase(zone_id)
-		emit_signal("ceasefire_ended", zone_id)
+
+func register_player_leave_zone(player_id: String) -> void:
+	if not _presence.has(player_id):
+		return
+	var now: int = Time.get_unix_time_from_system()
+	_commit_presence(player_id, _presence[player_id], now)
+	_presence.erase(player_id)
+
+
+func register_building_built(faction_id: String, zone_id: String) -> void:
+	var war_id: String = _active_wars_by_zone.get(zone_id, "")
+	if war_id.is_empty():
+		return
+	var w: War = _wars[war_id]
+	var ledger: ActivityLedger = w.ledger_for(faction_id)
+	if ledger == null:
+		return
+	ledger.buildings_built += 1
+	w.event_log.append(_make_event("building_built", {
+		"faction": faction_id,
+		"zone": zone_id,
+	}))
+	_notify_progress(w)
+
+
+func register_mini_game_victory(faction_id: String, zone_id: String, points: int = 1) -> void:
+	var war_id: String = _active_wars_by_zone.get(zone_id, "")
+	if war_id.is_empty():
+		return
+	var w: War = _wars[war_id]
+	var ledger: ActivityLedger = w.ledger_for(faction_id)
+	if ledger == null:
+		return
+	ledger.mini_game_wins += points
+	w.event_log.append(_make_event("mini_game_win", {
+		"faction": faction_id,
+		"zone": zone_id,
+		"points": points,
+	}))
+	_notify_progress(w)
+
+
+# ---------------------------------------------------------------------------
+# Query API
+# ---------------------------------------------------------------------------
+func get_war(war_id: String) -> War:
+	return _wars.get(war_id, null)
+
+
+func get_active_war_in_zone(zone_id: String) -> War:
+	var id: String = _active_wars_by_zone.get(zone_id, "")
+	if id.is_empty():
+		return null
+	return _wars.get(id, null)
+
+
+func get_active_wars_for_faction(faction_id: String) -> Array:
+	var out: Array = []
+	for w in _wars.values():
+		if (w as War).state == WarState.ACTIVE and w.is_participant(faction_id):
+			out.append(w)
+	return out
+
+
+func get_all_active_wars() -> Array:
+	var out: Array = []
+	for w in _wars.values():
+		if (w as War).state == WarState.ACTIVE:
+			out.append(w)
+	return out
+
+
+func get_war_log(war_id: String) -> Array:
+	var w: War = _wars.get(war_id, null)
+	if w == null:
+		return []
+	return w.event_log.duplicate(true)
+
+
+func get_active_ceasefires() -> Array:
+	return _ceasefires.duplicate()
+
+
+# ---------------------------------------------------------------------------
+# Internal — tick loop
+# ---------------------------------------------------------------------------
+func _on_tick() -> void:
+	var now: int = Time.get_unix_time_from_system()
+
+	# Accrue presence for still-in-zone players.
+	for pid in _presence.keys():
+		var p: Dictionary = _presence[pid]
+		_commit_presence(pid, p, now)
+		p["since_ts"] = now
+		_presence[pid] = p
+
+	# Progress / end active wars.
+	var to_end: Array = []
+	for w in _wars.values():
+		var war: War = w
+		if war.state != WarState.ACTIVE:
+			continue
+		_notify_progress(war)
+		if now >= war.ends_at:
+			to_end.append(war)
+	for war in to_end:
+		_resolve_war(war)
+
+	# Expire ceasefires.
+	var fresh: Array = []
+	for cf in _ceasefires:
+		if (cf as Ceasefire).expires_at <= now:
+			emit_signal("ceasefire_expired", cf.faction_a, cf.faction_b, cf.zone_id)
+		else:
+			fresh.append(cf)
+	_ceasefires = fresh
+
+
+func _commit_presence(player_id: String, p: Dictionary, now: int) -> void:
+	if not p.has("zone_id") or not p.has("faction_id"):
+		return
+	var zone_id: String = p["zone_id"]
+	var faction_id: String = p["faction_id"]
+	var since_ts: int = int(p.get("since_ts", now))
+	var elapsed: int = max(0, now - since_ts)
+	if elapsed <= 0:
+		return
+	var war_id: String = _active_wars_by_zone.get(zone_id, "")
+	if war_id.is_empty():
+		return
+	var w: War = _wars[war_id]
+	var ledger: ActivityLedger = w.ledger_for(faction_id)
+	if ledger == null:
+		return
+	ledger.presence_seconds += elapsed
+	ledger.last_presence_ts = now
+	# Track unique participants.
+	if not w.participant_count.has(faction_id):
+		w.participant_count[faction_id] = {}
+	(w.participant_count[faction_id] as Dictionary)[player_id] = now
+
+
+func _notify_progress(w: War) -> void:
+	var now: int = Time.get_unix_time_from_system()
+	emit_signal(
+		"war_tick",
+		w.id,
+		w.attacker_ledger.score(),
+		w.defender_ledger.score(),
+		w.seconds_remaining(now),
+	)
+
+
+# ---------------------------------------------------------------------------
+# Internal — war resolution
+# ---------------------------------------------------------------------------
+func _resolve_war(w: War) -> void:
+	var a_score: int = w.attacker_ledger.score()
+	var d_score: int = w.defender_ledger.score()
+
+	# Forfeit check — not enough unique participants on a side.
+	var a_part: int = (w.participant_count.get(w.attacker_id, {}) as Dictionary).size()
+	var d_part: int = (w.participant_count.get(w.defender_id, {}) as Dictionary).size()
+	if a_part < MIN_WAR_PARTICIPANTS_PER_SIDE and d_part >= MIN_WAR_PARTICIPANTS_PER_SIDE:
+		_end_war(w, w.defender_id, w.attacker_id, WarState.FORFEITED)
+		return
+	if d_part < MIN_WAR_PARTICIPANTS_PER_SIDE and a_part >= MIN_WAR_PARTICIPANTS_PER_SIDE:
+		_end_war(w, w.attacker_id, w.defender_id, WarState.FORFEITED)
+		return
+
+	# Defender wins ties (status-quo bias).
+	if a_score > d_score:
+		_end_war(w, w.attacker_id, w.defender_id, WarState.ENDED)
+	else:
+		_end_war(w, w.defender_id, w.attacker_id, WarState.ENDED)
+
+
+func _end_war(w: War, winner_id: String, loser_id: String, final_state: int) -> void:
+	w.state = final_state
+	w.winner_id = winner_id
+	w.loser_id = loser_id
+	w.event_log.append(_make_event("ended", {
+		"winner": winner_id,
+		"loser": loser_id,
+		"state": final_state,
+	}))
+	_active_wars_by_zone.erase(w.zone_id)
+
+	# Apply territory transfer if the attacker won.
+	var t: Territory = _territories.get(w.zone_id, null)
+	if t != null and winner_id == w.attacker_id:
+		var previous: String = t.owner_faction_id
+		t.owner_faction_id = winner_id
+		t.protected_until = Time.get_unix_time_from_system() + CEASEFIRE_DURATION_SECONDS
+		emit_signal("territory_captured", w.zone_id, winner_id, previous)
+		_flag_loser_buildings_damaged(w.zone_id, loser_id)
+
+	# Update faction stats via FactionManager (if available).
+	if _faction_manager != null:
+		if _faction_manager.has_method("register_war_result"):
+			_faction_manager.register_war_result(winner_id, true)
+			_faction_manager.register_war_result(loser_id, false)
+		if _faction_manager.has_method("register_territory_delta") \
+				and winner_id == w.attacker_id and t != null:
+			_faction_manager.register_territory_delta(winner_id, 1, t.building_value)
+			_faction_manager.register_territory_delta(loser_id, -1, -t.building_value)
+
+	emit_signal("war_ended", w.id, winner_id, loser_id, w.zone_id)
+	if final_state == WarState.FORFEITED:
+		emit_signal("war_forfeited", w.id, loser_id)
+
+	# Start ceasefire between the two factions for this zone.
+	_start_ceasefire(w.attacker_id, w.defender_id, w.zone_id)
+
+
+func _start_ceasefire(faction_a: String, faction_b: String, zone_id: String) -> void:
+	var now: int = Time.get_unix_time_from_system()
+	var cf: Ceasefire = Ceasefire.new(faction_a, faction_b, zone_id, now + CEASEFIRE_DURATION_SECONDS)
+	_ceasefires.append(cf)
+	emit_signal("ceasefire_started", faction_a, faction_b, zone_id, cf.expires_at)
+
+
+func _flag_loser_buildings_damaged(zone_id: String, loser_faction: String) -> void:
+	# The BuildingDecaySystem subscribes to this signal via a top-level hook;
+	# we emit through the FactionManager so it is observable without a
+	# hard dependency on the decay subsystem.
+	if _faction_manager != null and _faction_manager.has_signal("stats_updated"):
+		_faction_manager.emit_signal("stats_updated", loser_faction)
+	# The concrete decay pass happens when BuildingDecaySystem reads
+	# `Territory.protected_until` / the owner transition.
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return
+	for group_name in ["building_decay_listeners"]:
+		for listener in tree.get_nodes_in_group(group_name):
+			if listener.has_method("on_territory_captured"):
+				listener.on_territory_captured(zone_id, loser_faction)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+func _is_ceasefire_active(faction_a: String, faction_b: String, zone_id: String) -> bool:
+	var now: int = Time.get_unix_time_from_system()
+	for cf in _ceasefires:
+		var c: Ceasefire = cf
+		if c.expires_at <= now:
+			continue
+		if c.zone_id != zone_id:
+			continue
+		if (c.faction_a == faction_a and c.faction_b == faction_b) \
+				or (c.faction_a == faction_b and c.faction_b == faction_a):
+			return true
+	return false
+
+
+func _count_active_wars_for(faction_id: String) -> int:
+	var c: int = 0
+	for w in _wars.values():
+		if (w as War).state == WarState.ACTIVE and w.is_participant(faction_id):
+			c += 1
+	return c
+
+
+func _generate_war_id() -> String:
+	var idx: int = _next_war_index
+	_next_war_index += 1
+	return "WAR-%06d" % idx
+
+
+func _make_event(event_type: String, payload: Dictionary) -> Dictionary:
+	return {
+		"type": event_type,
+		"ts": Time.get_unix_time_from_system(),
+		"payload": payload,
+	}
+
+
+func _res(code: int, message: String) -> Dictionary:
+	return {"code": code, "message": message}
+
+
+func _get_faction(faction_id: String):
+	if _faction_manager == null:
+		return null
+	if _faction_manager.has_method("get_faction"):
+		return _faction_manager.get_faction(faction_id)
+	return null
+
+
+func _faction_has_war_authority(f: Object, player_id: String) -> bool:
+	if f == null:
+		return false
+	if not f.has_method("role_of"):
+		return true
+	var role: int = f.role_of(player_id)
+	# Role.OFFICER == 2, Role.LEADER == 3 in FactionManager
+	return role >= 2
+
+
+# ---------------------------------------------------------------------------
+# Debug helpers
+# ---------------------------------------------------------------------------
+func debug_force_end(war_id: String, winner_id: String) -> void:
+	var w: War = _wars.get(war_id, null)
+	if w == null or w.state != WarState.ACTIVE:
+		return
+	var loser_id: String = w.defender_id if winner_id == w.attacker_id else w.attacker_id
+	_end_war(w, winner_id, loser_id, WarState.ENDED)
+
+
+func debug_state_snapshot() -> Dictionary:
+	var now: int = Time.get_unix_time_from_system()
+	var wars_out: Array = []
+	for w in _wars.values():
+		wars_out.append((w as War).to_dict(now))
+	var cfs_out: Array = []
+	for cf in _ceasefires:
+		cfs_out.append({
+			"faction_a": (cf as Ceasefire).faction_a,
+			"faction_b": cf.faction_b,
+			"zone_id": cf.zone_id,
+			"expires_at": cf.expires_at,
+		})
+	var zones: Array = []
+	for z in _territories.values():
+		zones.append((z as Territory).to_dict())
+	return {
+		"territories": zones,
+		"wars": wars_out,
+		"ceasefires": cfs_out,
+	}

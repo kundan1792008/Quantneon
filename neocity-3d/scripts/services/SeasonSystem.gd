@@ -1,319 +1,557 @@
-## SeasonSystem — 30-day competitive season management with Hall of Fame.
+## SeasonSystem.gd
+## ----------------------------------------------------------------------------
+## Governs the 30-day competitive season loop for the Faction Wars metagame.
 ##
-## Features:
-##   • Seasons last SEASON_DURATION_DAYS (30 days).  Server is authoritative on start/end.
-##   • At season end: all territory is reset, badges awarded to top factions,
-##     exclusive building skins and faction banner customisation unlocked.
-##   • Hall of Fame: permanent per-season record of winners, persisted server-side and
-##     cached locally.
-##   • Faction leaderboard refreshed every LEADERBOARD_POLL_INTERVAL seconds and on demand.
-##   • Season score = territory_count * 50 + war_wins * 200 + total_building_value / 100.
+## Per issue #14:
+##   * A season lasts exactly 30 days of wall-clock time.
+##   * At the end of every season:
+##       - All territory ownership resets to neutral.
+##       - The top factions (by war points) receive badges, exclusive
+##         building skins and banner customisations.
+##       - A permanent Hall-of-Fame entry is recorded.
+##       - Season statistics held by FactionManager are cleared.
+##   * The next season auto-starts after a short off-season break.
 ##
-## Autoloaded as /root/SeasonSystem.
+## This system is intended to run as an autoload singleton, but is also
+## serialisable via `save_state()` / `load_state(state)` so that the host
+## server can persist progress across process restarts.
+## ----------------------------------------------------------------------------
 
 extends Node
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+const SEASON_DURATION_SECONDS: int = 30 * 24 * 60 * 60
+const OFFSEASON_DURATION_SECONDS: int = 12 * 60 * 60        # 12 hours break
+const TICK_INTERVAL_SECONDS: float = 30.0
+const TOP_N_BADGES: int = 10
+const PODIUM_SIZE: int = 3
+const MIN_POINTS_FOR_BADGE: int = 250
+const GRACE_PERIOD_AFTER_CAPTURE: int = 60 * 60 * 24 * 3   # for reset animation
 
-## Length of a full season in days.
-const SEASON_DURATION_DAYS: int = 30
+enum SeasonPhase {
+	OFFSEASON = 0,
+	ACTIVE = 1,
+	ENDING = 2,
+}
 
-## How often (seconds) the faction leaderboard is refreshed from the server.
-const LEADERBOARD_POLL_INTERVAL: float = 120.0
+const BADGE_TIERS: Array = [
+	{"rank": 1, "id": "season_champion", "name": "Season Champion", "skin": "gold_overlay"},
+	{"rank": 2, "id": "season_silver",   "name": "Silver Syndicate", "skin": "silver_overlay"},
+	{"rank": 3, "id": "season_bronze",   "name": "Bronze Contender", "skin": "bronze_overlay"},
+	{"rank": 4, "id": "season_top5",     "name": "Top 5 Finisher",   "skin": "neon_outline"},
+	{"rank": 5, "id": "season_top5",     "name": "Top 5 Finisher",   "skin": "neon_outline"},
+	{"rank": 6, "id": "season_top10",    "name": "Top 10 Finisher",  "skin": "chrome_outline"},
+	{"rank": 7, "id": "season_top10",    "name": "Top 10 Finisher",  "skin": "chrome_outline"},
+	{"rank": 8, "id": "season_top10",    "name": "Top 10 Finisher",  "skin": "chrome_outline"},
+	{"rank": 9, "id": "season_top10",    "name": "Top 10 Finisher",  "skin": "chrome_outline"},
+	{"rank": 10,"id": "season_top10",    "name": "Top 10 Finisher",  "skin": "chrome_outline"},
+]
 
-## Maximum number of Hall of Fame seasons stored locally.
-const HOF_MAX_ENTRIES: int = 20
+const EXCLUSIVE_BUILDING_SKINS: Array = [
+	"holo_glass_tower",
+	"crystal_spire",
+	"cyber_pagoda",
+	"bio_luminous_arch",
+	"mirror_monolith",
+	"fractal_pyramid",
+	"obsidian_keep",
+	"aurora_dome",
+]
 
-## Top N factions that receive season badges.
-const BADGE_RECIPIENTS: int = 3
+const BANNER_PALETTES: Array = [
+	{"id": "magenta_haze", "colors": ["#ff2bd6", "#1a0027", "#00eaff"]},
+	{"id": "solar_flare",  "colors": ["#ffae00", "#ff1f3d", "#2b0a14"]},
+	{"id": "glacier",      "colors": ["#8ff7ff", "#0d3b66", "#ffffff"]},
+	{"id": "emerald_neon", "colors": ["#30ff9a", "#003d28", "#ccffe5"]},
+	{"id": "midnight_ink", "colors": ["#6b2bff", "#110033", "#d7b8ff"]},
+	{"id": "crimson_edge", "colors": ["#ff1f3d", "#1a0009", "#ff9aa8"]},
+]
 
-## Season score weighting factors.
-const SCORE_WEIGHT_TERRITORY: int   = 50
-const SCORE_WEIGHT_WAR_WINS:  int   = 200
-const SCORE_WEIGHT_BLDG_VAL:  float = 0.01   # per QT of building value
 
-## Exclusive reward type identifiers.
-const REWARD_SKIN:   String = "building_skin"
-const REWARD_BANNER: String = "faction_banner"
-const REWARD_BADGE:  String = "season_badge"
+# ---------------------------------------------------------------------------
+# Signals
+# ---------------------------------------------------------------------------
+signal season_started(number: int)
+signal season_ending_soon(number: int, seconds_remaining: int)
+signal season_ended(number: int, winners: Array)
+signal offseason_started(number: int, ends_at: int)
+signal badge_awarded(faction_id: String, badge: Dictionary)
+signal skin_unlocked(faction_id: String, skin_id: String)
+signal banner_unlocked(faction_id: String, banner_id: String)
+signal hall_of_fame_updated(entry: Dictionary)
+signal phase_changed(new_phase: int)
 
-# ── Signals ───────────────────────────────────────────────────────────────────
 
-## Emitted when the current season metadata updates (number, start/end dates).
-signal season_updated(season_data: Dictionary)
+# ---------------------------------------------------------------------------
+# Internal classes
+# ---------------------------------------------------------------------------
+class SeasonRecord:
+	var number: int = 0
+	var phase: int = SeasonPhase.OFFSEASON
+	var started_at: int = 0
+	var ends_at: int = 0
+	var offseason_ends_at: int = 0
+	var standings: Array = []         # resolved at season end: [{faction_id,name,score,...}]
+	var awarded_skins: Dictionary = {}  # faction_id -> Array[String]
+	var awarded_badges: Dictionary = {} # faction_id -> Array[Dictionary]
+	var awarded_banners: Dictionary = {} # faction_id -> Array[String]
 
-## Emitted whenever the faction leaderboard refreshes.
-signal leaderboard_updated(entries: Array)
+	func seconds_remaining(now: int) -> int:
+		if phase == SeasonPhase.ACTIVE:
+			return max(0, ends_at - now)
+		if phase == SeasonPhase.OFFSEASON:
+			return max(0, offseason_ends_at - now)
+		return 0
 
-## Emitted when a season ends and rewards are distributed.
-signal season_ended(season_number: int, winners: Array)
+	func days_remaining(now: int) -> int:
+		return int(ceil(seconds_remaining(now) / 86400.0))
 
-## Emitted when a new season starts after the end-of-season reset.
-signal season_started(season_number: int, start_unix: int)
+	func to_dict() -> Dictionary:
+		return {
+			"number": number,
+			"phase": phase,
+			"started_at": started_at,
+			"ends_at": ends_at,
+			"offseason_ends_at": offseason_ends_at,
+			"standings": standings.duplicate(true),
+			"awarded_skins": awarded_skins.duplicate(true),
+			"awarded_badges": awarded_badges.duplicate(true),
+			"awarded_banners": awarded_banners.duplicate(true),
+		}
 
-## Emitted when a Hall of Fame entry is added.
-signal hall_of_fame_updated(hof: Array)
 
-## Emitted when the local player/faction earns a reward.
-signal reward_earned(reward_type: String, reward_data: Dictionary)
+class HallOfFameEntry:
+	var season_number: int
+	var started_at: int
+	var ended_at: int
+	var podium: Array = []            # [{faction_id,name,tag,score,district_id}]
+	var notable_stats: Dictionary = {}
+	var ts_recorded: int = 0
 
-# ── State ─────────────────────────────────────────────────────────────────────
+	func _init(p_season: int = 0) -> void:
+		season_number = p_season
+		ts_recorded = Time.get_unix_time_from_system()
 
-## Current season number (1-indexed). 0 = not yet initialised.
-var current_season_number: int = 0
+	func to_dict() -> Dictionary:
+		return {
+			"season_number": season_number,
+			"started_at": started_at,
+			"ended_at": ended_at,
+			"podium": podium.duplicate(true),
+			"notable_stats": notable_stats.duplicate(true),
+			"ts_recorded": ts_recorded,
+		}
 
-## Unix timestamp of when the current season started.
-var season_start_unix: int = 0
 
-## Unix timestamp of when the current season ends.
-var season_end_unix: int = 0
+# ---------------------------------------------------------------------------
+# Runtime state
+# ---------------------------------------------------------------------------
+var _current: SeasonRecord = SeasonRecord.new()
+var _hall_of_fame: Array = []        # [HallOfFameEntry]
+var _tick_timer: Timer
+var _warned_24h: bool = false
+var _warned_1h: bool = false
+var _faction_manager: Node = null
+var _territory_war: Node = null
+var _auto_rollover: bool = true
 
-## Whether the season-end ceremony is currently in progress.
-var is_season_ending: bool = false
 
-## The faction leaderboard for the current season.
-## Each entry: {faction_id, faction_name, season_score, territory_count, war_wins,
-##              total_building_value, member_count, rank}
-var faction_leaderboard: Array = []
-
-## Hall of Fame: Array of season records.
-## Each record: {season_number, start_date, end_date, winners: [{rank, faction_id, faction_name,
-##   season_score, badge_color}], total_factions, total_wars}
-var hall_of_fame: Array = []
-
-## Rewards earned this session by the local faction.
-## Each entry: {reward_type, season_number, faction_id, data}
-var earned_rewards: Array = []
-
-## Internal poll timer.
-var _poll_timer: float = 0.0
-
-## Socket reference.
-var _socket: Node = null
-
-# ── Lifecycle ─────────────────────────────────────────────────────────────────
-
+# ---------------------------------------------------------------------------
+# Engine lifecycle
+# ---------------------------------------------------------------------------
 func _ready() -> void:
-	_resolve_socket()
-	print("[SeasonSystem] Ready.")
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	_tick_timer = Timer.new()
+	_tick_timer.wait_time = TICK_INTERVAL_SECONDS
+	_tick_timer.autostart = true
+	add_child(_tick_timer)
+	_tick_timer.timeout.connect(_on_tick)
+	_faction_manager = _resolve_singleton("FactionManager")
+	_territory_war = _resolve_singleton("TerritoryWar")
+	if _current.phase == SeasonPhase.OFFSEASON and _current.number == 0:
+		_current.number = 1
+		_current.offseason_ends_at = Time.get_unix_time_from_system()
+		_begin_active_season()
+	print("[SeasonSystem] Service ready. Active season #%d" % _current.number)
 
-func _process(delta: float) -> void:
-	_poll_timer += delta
-	if _poll_timer >= LEADERBOARD_POLL_INTERVAL:
-		_poll_timer = 0.0
-		request_leaderboard()
-	_check_season_end()
 
-# ── Socket helpers ─────────────────────────────────────────────────────────────
+func _resolve_singleton(node_name: String) -> Node:
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return null
+	var root: Node = tree.root
+	if root != null and root.has_node(node_name):
+		return root.get_node(node_name)
+	return null
 
-func _resolve_socket() -> void:
-	_socket = get_node_or_null("/root/SocketIOClient")
-	if _socket == null:
-		get_tree().create_timer(1.0).timeout.connect(_resolve_socket)
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+func get_current_season_number() -> int:
+	return _current.number
+
+
+func get_current_phase() -> int:
+	return _current.phase
+
+
+func describe_current_season() -> Dictionary:
+	var now: int = Time.get_unix_time_from_system()
+	var phase_name: String = ""
+	match _current.phase:
+		SeasonPhase.ACTIVE:
+			phase_name = "active"
+		SeasonPhase.OFFSEASON:
+			phase_name = "offseason"
+		SeasonPhase.ENDING:
+			phase_name = "ending"
+	return {
+		"number": _current.number,
+		"phase": phase_name,
+		"phase_code": _current.phase,
+		"seconds_remaining": _current.seconds_remaining(now),
+		"days_remaining": _current.days_remaining(now),
+		"started_at": _current.started_at,
+		"ends_at": _current.ends_at,
+		"offseason_ends_at": _current.offseason_ends_at,
+	}
+
+
+func force_end_season() -> void:
+	# Admin hook for testing or emergency rollover.
+	if _current.phase != SeasonPhase.ACTIVE:
 		return
-	_socket.on_event("season_state",       _on_season_state)
-	_socket.on_event("season_leaderboard", _on_season_leaderboard)
-	_socket.on_event("season_end",         _on_season_end)
-	_socket.on_event("season_start",       _on_season_start)
-	_socket.on_event("hall_of_fame",       _on_hall_of_fame)
-	_socket.on_event("season_reward",      _on_season_reward)
-	print("[SeasonSystem] Socket events registered.")
-	# Request current state immediately.
-	_emit("get_season_state", {})
-	request_leaderboard()
+	_end_active_season()
 
-func _emit(event: String, payload: Dictionary) -> void:
-	if _socket == null:
-		push_warning("[SeasonSystem] Cannot emit '%s' — socket unavailable." % event)
-		return
-	_socket.send_event(event, payload)
 
-# ── Public API ────────────────────────────────────────────────────────────────
+func set_auto_rollover(enabled: bool) -> void:
+	_auto_rollover = enabled
 
-## Request the latest faction leaderboard from the server.
-func request_leaderboard() -> void:
-	_emit("get_season_leaderboard", {"season_number": current_season_number})
 
-## Request the full Hall of Fame from the server.
-func request_hall_of_fame() -> void:
-	_emit("get_hall_of_fame", {})
+func get_hall_of_fame(limit: int = 20) -> Array:
+	var out: Array = []
+	var start: int = max(0, _hall_of_fame.size() - limit)
+	for i in range(start, _hall_of_fame.size()):
+		out.append((_hall_of_fame[i] as HallOfFameEntry).to_dict())
+	return out
 
-## Returns days remaining in the current season (0 if unknown or ended).
-func days_remaining_in_season() -> int:
-	if season_end_unix == 0:
-		return 0
-	var now: int  = int(Time.get_unix_time_from_system())
-	var secs: int = max(0, season_end_unix - now)
-	return secs / 86400
 
-## Returns hours remaining in the current season.
-func hours_remaining_in_season() -> int:
-	if season_end_unix == 0:
-		return 0
-	var now: int  = int(Time.get_unix_time_from_system())
-	var secs: int = max(0, season_end_unix - now)
-	return secs / 3600
-
-## Returns a human-readable countdown string "Xd Xh Xm".
-func format_season_countdown() -> String:
-	if season_end_unix == 0:
-		return "Unknown"
-	var now: int   = int(Time.get_unix_time_from_system())
-	var secs: int  = max(0, season_end_unix - now)
-	var days: int  = secs / 86400
-	var hours: int = (secs % 86400) / 3600
-	var mins: int  = (secs % 3600) / 60
-	return "%dd %dh %dm" % [days, hours, mins]
-
-## Calculate an aggregate season score for a faction stat snapshot.
-## Returns integer score. Server score is authoritative; this is for preview.
-func calculate_season_score(territory_count: int, war_wins: int, total_building_value: int) -> int:
-	return (territory_count * SCORE_WEIGHT_TERRITORY) \
-		 + (war_wins        * SCORE_WEIGHT_WAR_WINS) \
-		 + int(float(total_building_value) * SCORE_WEIGHT_BLDG_VAL)
-
-## Returns the rank (1-indexed) of a faction in the current leaderboard, or 0 if not present.
-func get_faction_rank(faction_id: String) -> int:
-	for entry in faction_leaderboard:
-		if entry.get("faction_id", "") == faction_id:
-			return int(entry.get("rank", 0))
-	return 0
-
-## Returns the Hall of Fame entry for a specific season number, or empty dict.
-func get_hof_season(season_number: int) -> Dictionary:
-	for record in hall_of_fame:
-		if int(record.get("season_number", -1)) == season_number:
-			return record
+func get_hall_of_fame_entry(season_number: int) -> Dictionary:
+	for e in _hall_of_fame:
+		var h: HallOfFameEntry = e
+		if h.season_number == season_number:
+			return h.to_dict()
 	return {}
 
-## Returns the faction with the highest season score, or empty dict.
-func get_current_leader() -> Dictionary:
-	if faction_leaderboard.is_empty():
-		return {}
-	return faction_leaderboard[0]
 
-# ── Internal: season-end check ────────────────────────────────────────────────
+func get_faction_rewards(faction_id: String) -> Dictionary:
+	return {
+		"skins": _current.awarded_skins.get(faction_id, []).duplicate(),
+		"badges": _current.awarded_badges.get(faction_id, []).duplicate(),
+		"banners": _current.awarded_banners.get(faction_id, []).duplicate(),
+	}
 
-func _check_season_end() -> void:
-	if season_end_unix == 0 or is_season_ending:
+
+# ---------------------------------------------------------------------------
+# Tick loop
+# ---------------------------------------------------------------------------
+func _on_tick() -> void:
+	var now: int = Time.get_unix_time_from_system()
+	match _current.phase:
+		SeasonPhase.ACTIVE:
+			var remaining: int = max(0, _current.ends_at - now)
+			if remaining <= 0:
+				_end_active_season()
+				return
+			if remaining <= 3600 and not _warned_1h:
+				_warned_1h = true
+				emit_signal("season_ending_soon", _current.number, remaining)
+			elif remaining <= 86400 and not _warned_24h:
+				_warned_24h = true
+				emit_signal("season_ending_soon", _current.number, remaining)
+		SeasonPhase.OFFSEASON:
+			if _auto_rollover and now >= _current.offseason_ends_at:
+				_current.number += 1
+				_begin_active_season()
+		SeasonPhase.ENDING:
+			# ENDING is transient — should never linger. Recover.
+			_enter_offseason()
+		_:
+			pass
+
+
+# ---------------------------------------------------------------------------
+# Season transitions
+# ---------------------------------------------------------------------------
+func _begin_active_season() -> void:
+	var now: int = Time.get_unix_time_from_system()
+	_current.phase = SeasonPhase.ACTIVE
+	_current.started_at = now
+	_current.ends_at = now + SEASON_DURATION_SECONDS
+	_current.offseason_ends_at = 0
+	_current.standings.clear()
+	_current.awarded_skins.clear()
+	_current.awarded_badges.clear()
+	_current.awarded_banners.clear()
+	_warned_24h = false
+	_warned_1h = false
+	emit_signal("phase_changed", _current.phase)
+	emit_signal("season_started", _current.number)
+
+
+func _end_active_season() -> void:
+	_current.phase = SeasonPhase.ENDING
+	emit_signal("phase_changed", _current.phase)
+	var standings: Array = _compute_standings()
+	_current.standings = standings
+
+	_distribute_rewards(standings)
+	_record_hall_of_fame(standings)
+	_reset_territory()
+	_reset_faction_stats()
+
+	emit_signal("season_ended", _current.number, standings)
+	_enter_offseason()
+
+
+func _enter_offseason() -> void:
+	var now: int = Time.get_unix_time_from_system()
+	_current.phase = SeasonPhase.OFFSEASON
+	_current.offseason_ends_at = now + OFFSEASON_DURATION_SECONDS
+	emit_signal("phase_changed", _current.phase)
+	emit_signal("offseason_started", _current.number, _current.offseason_ends_at)
+
+
+# ---------------------------------------------------------------------------
+# Standings & rewards
+# ---------------------------------------------------------------------------
+func _compute_standings() -> Array:
+	if _faction_manager == null or not _faction_manager.has_method("get_leaderboard"):
+		return []
+	var rows: Array = _faction_manager.get_leaderboard("war_points_season", 100)
+	var enriched: Array = []
+	for r in rows:
+		var entry: Dictionary = {
+			"faction_id": r.get("faction_id", ""),
+			"name": r.get("name", ""),
+			"tag": r.get("tag", ""),
+			"district_id": r.get("district_id", ""),
+			"score": int(r.get("score", 0)),
+			"stats": r.get("stats", {}),
+		}
+		enriched.append(entry)
+	return enriched
+
+
+func _distribute_rewards(standings: Array) -> void:
+	var rank: int = 0
+	for row in standings:
+		rank += 1
+		if rank > TOP_N_BADGES:
+			break
+		var fid: String = String(row.get("faction_id", ""))
+		if fid.is_empty():
+			continue
+		var score: int = int(row.get("score", 0))
+		if score < MIN_POINTS_FOR_BADGE:
+			continue
+		_award_badge(fid, rank)
+		if rank <= PODIUM_SIZE:
+			_award_skin(fid, EXCLUSIVE_BUILDING_SKINS[rank - 1])
+			_award_banner(fid, BANNER_PALETTES[rank - 1].id)
+		elif rank <= 5:
+			_award_skin(fid, EXCLUSIVE_BUILDING_SKINS[(rank - 1) % EXCLUSIVE_BUILDING_SKINS.size()])
+		# Participation banner for top 10.
+		if rank <= TOP_N_BADGES:
+			var banner_idx: int = (rank - 1) % BANNER_PALETTES.size()
+			_award_banner(fid, BANNER_PALETTES[banner_idx].id)
+
+
+func _award_badge(faction_id: String, rank: int) -> void:
+	var template: Dictionary = BADGE_TIERS[clamp(rank - 1, 0, BADGE_TIERS.size() - 1)]
+	var badge: Dictionary = {
+		"id": template.id,
+		"name": template.name,
+		"skin": template.skin,
+		"rank": rank,
+		"season_number": _current.number,
+		"awarded_at": Time.get_unix_time_from_system(),
+	}
+	var list: Array = _current.awarded_badges.get(faction_id, [])
+	list.append(badge)
+	_current.awarded_badges[faction_id] = list
+	emit_signal("badge_awarded", faction_id, badge)
+
+
+func _award_skin(faction_id: String, skin_id: String) -> void:
+	var list: Array = _current.awarded_skins.get(faction_id, [])
+	if list.has(skin_id):
 		return
-	var now: int = int(Time.get_unix_time_from_system())
-	if now >= season_end_unix:
-		is_season_ending = true
-		# The server is authoritative; this local flag prevents repeated triggers.
-		# A "season_end" socket event will arrive shortly confirming the end.
-		print("[SeasonSystem] Season %d end detected locally; awaiting server confirmation." % current_season_number)
+	list.append(skin_id)
+	_current.awarded_skins[faction_id] = list
+	emit_signal("skin_unlocked", faction_id, skin_id)
 
-# ── Socket event handlers ──────────────────────────────────────────────────────
 
-func _on_season_state(data: Dictionary) -> void:
-	current_season_number = int(data.get("season_number", 0))
-	season_start_unix     = int(data.get("start_unix", 0))
-	season_end_unix       = int(data.get("end_unix", 0))
-	is_season_ending      = false
-	emit_signal("season_updated", data)
-	print("[SeasonSystem] Season %d  start=%d end=%d" % [
-		current_season_number, season_start_unix, season_end_unix])
+func _award_banner(faction_id: String, banner_id: String) -> void:
+	var list: Array = _current.awarded_banners.get(faction_id, [])
+	if list.has(banner_id):
+		return
+	list.append(banner_id)
+	_current.awarded_banners[faction_id] = list
+	emit_signal("banner_unlocked", faction_id, banner_id)
 
-func _on_season_leaderboard(data: Dictionary) -> void:
-	var raw_entries: Array = data.get("entries", [])
-	faction_leaderboard.clear()
-	for i in range(raw_entries.size()):
-		var entry: Dictionary = raw_entries[i]
-		entry["rank"] = i + 1
-		# Compute local score if server didn't provide one.
-		if not entry.has("season_score"):
-			entry["season_score"] = calculate_season_score(
-				int(entry.get("territory_count", 0)),
-				int(entry.get("war_wins", 0)),
-				int(entry.get("total_building_value", 0))
-			)
-		faction_leaderboard.append(entry)
-	emit_signal("leaderboard_updated", faction_leaderboard)
 
-func _on_season_end(data: Dictionary) -> void:
-	is_season_ending = true
-	var season_num: int = int(data.get("season_number", current_season_number))
-	var winners: Array  = data.get("winners", [])
+# ---------------------------------------------------------------------------
+# Cleanup at season end
+# ---------------------------------------------------------------------------
+func _reset_territory() -> void:
+	if _territory_war == null or not _territory_war.has_method("get_all_territories"):
+		return
+	for t in _territory_war.get_all_territories():
+		if t.owner_faction_id == "":
+			continue
+		if _territory_war.has_method("set_territory_owner"):
+			_territory_war.set_territory_owner(t.id, "")
 
-	# Build HOF record.
-	var hof_record: Dictionary = {
-		"season_number":  season_num,
-		"start_date":     _unix_to_date(season_start_unix),
-		"end_date":       _unix_to_date(int(Time.get_unix_time_from_system())),
-		"winners":        _build_hof_winners(winners),
-		"total_factions": int(data.get("total_factions", faction_leaderboard.size())),
-		"total_wars":     int(data.get("total_wars", 0))
-	}
-	_add_hof_record(hof_record)
-	emit_signal("season_ended", season_num, winners)
-	print("[SeasonSystem] Season %d ended. HOF record saved." % season_num)
 
-func _on_season_start(data: Dictionary) -> void:
-	current_season_number = int(data.get("season_number", current_season_number + 1))
-	season_start_unix     = int(data.get("start_unix", int(Time.get_unix_time_from_system())))
-	season_end_unix       = season_start_unix + SEASON_DURATION_DAYS * 86400
-	is_season_ending      = false
-	faction_leaderboard.clear()
-	emit_signal("season_started", current_season_number, season_start_unix)
-	emit_signal("season_updated", {
-		"season_number": current_season_number,
-		"start_unix":    season_start_unix,
-		"end_unix":      season_end_unix
-	})
-	print("[SeasonSystem] Season %d started." % current_season_number)
+func _reset_faction_stats() -> void:
+	if _faction_manager == null:
+		return
+	if _faction_manager.has_method("reset_season_stats"):
+		_faction_manager.reset_season_stats()
 
-func _on_hall_of_fame(data: Dictionary) -> void:
-	var records: Array = data.get("records", [])
-	hall_of_fame.clear()
-	for r in records:
-		hall_of_fame.append(r)
-	# Keep only the most recent HOF_MAX_ENTRIES.
-	if hall_of_fame.size() > HOF_MAX_ENTRIES:
-		hall_of_fame = hall_of_fame.slice(hall_of_fame.size() - HOF_MAX_ENTRIES)
-	emit_signal("hall_of_fame_updated", hall_of_fame)
 
-func _on_season_reward(data: Dictionary) -> void:
-	var reward_type: String = data.get("reward_type", "")
-	var reward_data: Dictionary = data.get("data", {})
-	var entry: Dictionary = {
-		"reward_type":    reward_type,
-		"season_number":  current_season_number,
-		"faction_id":     data.get("faction_id", ""),
-		"data":           reward_data
-	}
-	earned_rewards.append(entry)
-	emit_signal("reward_earned", reward_type, reward_data)
-	print("[SeasonSystem] Reward earned: %s — %s" % [reward_type, str(reward_data)])
-
-# ── Internal helpers ───────────────────────────────────────────────────────────
-
-func _add_hof_record(record: Dictionary) -> void:
-	hall_of_fame.append(record)
-	if hall_of_fame.size() > HOF_MAX_ENTRIES:
-		hall_of_fame = hall_of_fame.slice(1)
-	emit_signal("hall_of_fame_updated", hall_of_fame)
-
-func _build_hof_winners(raw_winners: Array) -> Array:
-	var result: Array = []
-	var badge_colors: Array = [
-		Color(1.0, 0.85, 0.0),  # Gold   (rank 1)
-		Color(0.8, 0.8, 0.8),  # Silver (rank 2)
-		Color(0.8, 0.5, 0.2)   # Bronze (rank 3)
-	]
-	for i in range(min(raw_winners.size(), BADGE_RECIPIENTS)):
-		var w: Dictionary = raw_winners[i]
-		result.append({
-			"rank":          i + 1,
-			"faction_id":    w.get("faction_id", ""),
-			"faction_name":  w.get("faction_name", "?"),
-			"season_score":  int(w.get("season_score", 0)),
-			"territory_count": int(w.get("territory_count", 0)),
-			"war_wins":      int(w.get("war_wins", 0)),
-			"badge_color":   badge_colors[i]
+func _record_hall_of_fame(standings: Array) -> void:
+	var entry: HallOfFameEntry = HallOfFameEntry.new(_current.number)
+	entry.started_at = _current.started_at
+	entry.ended_at = Time.get_unix_time_from_system()
+	var podium: Array = []
+	var count: int = 0
+	for row in standings:
+		if count >= PODIUM_SIZE:
+			break
+		podium.append({
+			"faction_id": row.get("faction_id", ""),
+			"name": row.get("name", ""),
+			"tag": row.get("tag", ""),
+			"score": int(row.get("score", 0)),
+			"district_id": row.get("district_id", ""),
 		})
-	return result
+		count += 1
+	entry.podium = podium
+	entry.notable_stats = _collect_notable_stats(standings)
+	_hall_of_fame.append(entry)
+	emit_signal("hall_of_fame_updated", entry.to_dict())
 
-func _unix_to_date(unix: int) -> String:
-	var dt: Dictionary = Time.get_datetime_dict_from_unix_time(unix)
-	return "%04d-%02d-%02d" % [dt["year"], dt["month"], dt["day"]]
+
+func _collect_notable_stats(standings: Array) -> Dictionary:
+	var most_wars: Dictionary = {"faction_id": "", "value": 0}
+	var most_territory: Dictionary = {"faction_id": "", "value": 0}
+	var most_minigames: Dictionary = {"faction_id": "", "value": 0}
+	var total_points: int = 0
+	for row in standings:
+		var stats: Dictionary = row.get("stats", {})
+		total_points += int(row.get("score", 0))
+		var wars: int = int(stats.get("war_wins", 0))
+		if wars > int(most_wars["value"]):
+			most_wars = {"faction_id": row.get("faction_id", ""), "value": wars}
+		var terr: int = int(stats.get("territory_count", 0))
+		if terr > int(most_territory["value"]):
+			most_territory = {"faction_id": row.get("faction_id", ""), "value": terr}
+		var mg: int = int(stats.get("mini_games_won", 0))
+		if mg > int(most_minigames["value"]):
+			most_minigames = {"faction_id": row.get("faction_id", ""), "value": mg}
+	return {
+		"most_wars_won": most_wars,
+		"most_territory_held": most_territory,
+		"most_mini_game_wins": most_minigames,
+		"total_war_points": total_points,
+		"participating_factions": standings.size(),
+	}
+
+
+# ---------------------------------------------------------------------------
+# Serialisation
+# ---------------------------------------------------------------------------
+func save_state() -> Dictionary:
+	var hof: Array = []
+	for h in _hall_of_fame:
+		hof.append((h as HallOfFameEntry).to_dict())
+	return {
+		"current": _current.to_dict(),
+		"hall_of_fame": hof,
+		"warned_24h": _warned_24h,
+		"warned_1h": _warned_1h,
+		"auto_rollover": _auto_rollover,
+	}
+
+
+func load_state(state: Dictionary) -> void:
+	if state.is_empty():
+		return
+	var cur: Dictionary = state.get("current", {})
+	if typeof(cur) == TYPE_DICTIONARY and not cur.is_empty():
+		_current = SeasonRecord.new()
+		_current.number = int(cur.get("number", 1))
+		_current.phase = int(cur.get("phase", SeasonPhase.OFFSEASON))
+		_current.started_at = int(cur.get("started_at", 0))
+		_current.ends_at = int(cur.get("ends_at", 0))
+		_current.offseason_ends_at = int(cur.get("offseason_ends_at", 0))
+		_current.standings = (cur.get("standings", []) as Array).duplicate(true)
+		_current.awarded_skins = (cur.get("awarded_skins", {}) as Dictionary).duplicate(true)
+		_current.awarded_badges = (cur.get("awarded_badges", {}) as Dictionary).duplicate(true)
+		_current.awarded_banners = (cur.get("awarded_banners", {}) as Dictionary).duplicate(true)
+	_hall_of_fame.clear()
+	for raw in state.get("hall_of_fame", []):
+		var h: HallOfFameEntry = HallOfFameEntry.new(int(raw.get("season_number", 0)))
+		h.started_at = int(raw.get("started_at", 0))
+		h.ended_at = int(raw.get("ended_at", 0))
+		h.podium = (raw.get("podium", []) as Array).duplicate(true)
+		h.notable_stats = (raw.get("notable_stats", {}) as Dictionary).duplicate(true)
+		h.ts_recorded = int(raw.get("ts_recorded", 0))
+		_hall_of_fame.append(h)
+	_warned_24h = bool(state.get("warned_24h", false))
+	_warned_1h = bool(state.get("warned_1h", false))
+	_auto_rollover = bool(state.get("auto_rollover", true))
+
+
+# ---------------------------------------------------------------------------
+# Debug / test helpers
+# ---------------------------------------------------------------------------
+func debug_set_remaining_seconds(seconds: int) -> void:
+	if _current.phase != SeasonPhase.ACTIVE:
+		return
+	_current.ends_at = Time.get_unix_time_from_system() + max(0, seconds)
+
+
+func debug_snapshot() -> Dictionary:
+	return {
+		"current": _current.to_dict(),
+		"hall_of_fame_size": _hall_of_fame.size(),
+	}
+
+
+func debug_bootstrap_mock_season(badges_for: Array) -> void:
+	# Manufacture a dummy standings set to exercise reward logic.
+	var standings: Array = []
+	var i: int = 0
+	for fid in badges_for:
+		i += 1
+		standings.append({
+			"faction_id": fid,
+			"name": "Mock %s" % fid,
+			"tag": "MCK",
+			"district_id": "D0",
+			"score": 1000 - i * 50,
+			"stats": {
+				"war_wins": 5 - i,
+				"territory_count": 10 - i,
+				"mini_games_won": 20 - i,
+			},
+		})
+	_current.standings = standings
+	_distribute_rewards(standings)
+	_record_hall_of_fame(standings)

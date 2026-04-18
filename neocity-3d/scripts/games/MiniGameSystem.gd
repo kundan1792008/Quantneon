@@ -1,503 +1,660 @@
-## MiniGameSystem — Three war-point mini-games playable during active faction wars.
+## MiniGameSystem.gd
+## ----------------------------------------------------------------------------
+## Coordinates the three war-time mini-games (Race / Build / Defend) used to
+## earn war points during an active TerritoryWar.
 ##
-## Games available:
-##   • RACE   — Drive or run through checkpoints in the war zone before time expires.
-##   • BUILD  — Fastest player to construct a structure earns top points.
-##   • DEFEND — Survive increasingly difficult NPC waves; score based on waves cleared.
-##
-## Rules:
-##   • Mini-games can only be started when a war is active in the local zone.
-##   • Each game awards WAR_POINTS_MIN to WAR_POINTS_MAX war points to the
-##     winner's faction activity score.
-##   • Points are reported to TerritoryWar which forwards them to the server.
-##
-## Autoloaded as /root/MiniGameSystem.
+## Rules (from issue #14):
+##   * Three modes:
+##       - RACE:   drive through checkpoints fastest
+##       - BUILD:  construct the target structure fastest
+##       - DEFEND: survive enemy waves the longest
+##   * Each mini-game awards 100-500 war points, scaled by performance.
+##   * Mini-games are only playable while a war is active in the zone where
+##     the match is staged.
+## ----------------------------------------------------------------------------
 
 extends Node
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-
-const WAR_POINTS_MIN: int = 100
-const WAR_POINTS_MAX: int = 500
-
-## Duration limits (seconds) for each game.
-const RACE_TIME_LIMIT_SECS:    float = 180.0  # 3 minutes
-const BUILD_TIME_LIMIT_SECS:   float = 120.0  # 2 minutes
-const DEFEND_WAVE_DURATION_SECS: float = 60.0 # 1 minute per wave
-
-const DEFEND_MAX_WAVES: int = 5
-
-## NPC count per defend wave (scales up each wave).
-const DEFEND_BASE_NPCS: int = 3
-const DEFEND_NPC_SCALE:  int = 2  # additional NPCs per wave
-
-## Race checkpoint reward (points per checkpoint hit before finish).
-const RACE_POINTS_PER_CHECKPOINT: int = 10
-
-## Build complexity tiers → points mapping.
-const BUILD_TIER_POINTS: Dictionary = {
-	1: 100,   # simple 1-block structure
-	2: 200,   # medium 3-block structure
-	3: 350,   # complex 6-block structure
-	4: 500    # masterpiece 10+ block structure
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+enum GameMode {
+	RACE = 0,
+	BUILD = 1,
+	DEFEND = 2,
 }
 
-# ── Game type constants ────────────────────────────────────────────────────────
+enum MatchState {
+	LOBBY = 0,
+	COUNTDOWN = 1,
+	RUNNING = 2,
+	COMPLETED = 3,
+	ABORTED = 4,
+}
 
-const GAME_RACE:   String = "race"
-const GAME_BUILD:  String = "build"
-const GAME_DEFEND: String = "defend"
+enum JoinResult {
+	OK,
+	MATCH_NOT_FOUND,
+	MATCH_FULL,
+	ALREADY_IN_MATCH,
+	NOT_IN_FACTION,
+	WRONG_FACTION,
+}
 
-# ── Game state constants ───────────────────────────────────────────────────────
+const MIN_POINTS: int = 100
+const MAX_POINTS: int = 500
+const COUNTDOWN_SECONDS: int = 10
+const DEFAULT_MATCH_DURATION_SECONDS: int = 300    # fallback cap
+const RACE_DEFAULT_DURATION: int = 240
+const BUILD_DEFAULT_DURATION: int = 360
+const DEFEND_DEFAULT_DURATION: int = 600
+const MAX_PARTICIPANTS_PER_MATCH: int = 16
+const MIN_PARTICIPANTS_TO_START: int = 2
+const RACE_CHECKPOINT_POINTS: int = 25
+const BUILD_STEP_POINTS: int = 40
+const DEFEND_WAVE_POINTS: int = 60
 
-const STATE_IDLE:      String = "idle"
-const STATE_COUNTDOWN: String = "countdown"
-const STATE_RUNNING:   String = "running"
-const STATE_FINISHED:  String = "finished"
+# ---------------------------------------------------------------------------
+# Signals
+# ---------------------------------------------------------------------------
+signal match_created(match_id: String, mode: int, zone_id: String)
+signal match_started(match_id: String)
+signal match_tick(match_id: String, payload: Dictionary)
+signal match_completed(match_id: String, winning_faction_id: String, points_awarded: int)
+signal match_aborted(match_id: String, reason: String)
+signal player_joined(match_id: String, player_id: String, faction_id: String)
+signal player_left(match_id: String, player_id: String)
+signal checkpoint_reached(match_id: String, player_id: String, checkpoint_index: int)
+signal build_step_completed(match_id: String, player_id: String, step: int)
+signal wave_survived(match_id: String, wave_index: int, faction_id: String)
 
-# ── Signals ───────────────────────────────────────────────────────────────────
 
-## Emitted when a mini-game session starts.
-signal game_started(game_type: String, war_id: String)
+# ---------------------------------------------------------------------------
+# Internal classes
+# ---------------------------------------------------------------------------
+class Participant:
+	var player_id: String
+	var display_name: String
+	var faction_id: String
+	var joined_at: int
+	var score: int = 0
+	var checkpoints_hit: int = 0
+	var build_steps_done: int = 0
+	var damage_dealt: int = 0
+	var is_alive: bool = true
+	var finish_position: int = -1        # RACE: 1-based; -1 until finished
+	var finish_time_ms: int = -1
 
-## Emitted each second of a running game with remaining time.
-signal game_tick(game_type: String, seconds_remaining: float)
+	func _init(pid: String = "", pname: String = "", fid: String = "") -> void:
+		player_id = pid
+		display_name = pname
+		faction_id = fid
+		joined_at = Time.get_unix_time_from_system()
 
-## Emitted when the local player hits a race checkpoint.
-signal checkpoint_hit(checkpoint_index: int, total_checkpoints: int)
+	func to_dict() -> Dictionary:
+		return {
+			"player_id": player_id,
+			"display_name": display_name,
+			"faction_id": faction_id,
+			"score": score,
+			"checkpoints_hit": checkpoints_hit,
+			"build_steps_done": build_steps_done,
+			"damage_dealt": damage_dealt,
+			"finish_position": finish_position,
+			"finish_time_ms": finish_time_ms,
+			"is_alive": is_alive,
+		}
 
-## Emitted when a build structure is completed.
-signal build_completed(tier: int, time_taken: float)
 
-## Emitted when a defend wave starts.
-signal defend_wave_started(wave_number: int, npc_count: int)
+class MatchRecord:
+	var id: String
+	var mode: int
+	var zone_id: String
+	var war_id: String                       # optional, if tied to a war
+	var state: int = MatchState.LOBBY
+	var created_at: int = 0
+	var started_at: int = 0
+	var deadline_ts: int = 0
+	var duration_seconds: int = DEFAULT_MATCH_DURATION_SECONDS
+	var participants: Dictionary = {}        # player_id -> Participant
+	var faction_scores: Dictionary = {}      # faction_id -> int
+	var checkpoint_count: int = 0            # RACE
+	var build_total_steps: int = 0           # BUILD
+	var build_faction_progress: Dictionary = {}   # faction_id -> int (steps)
+	var defend_current_wave: int = 0         # DEFEND
+	var winner_faction_id: String = ""
+	var awarded_points: int = 0
+	var config: Dictionary = {}
+	var log: Array = []
 
-## Emitted when a defend wave is cleared.
-signal defend_wave_cleared(wave_number: int, survivors: int)
+	func _init(p_id: String = "", p_mode: int = GameMode.RACE, p_zone: String = "") -> void:
+		id = p_id
+		mode = p_mode
+		zone_id = p_zone
+		created_at = Time.get_unix_time_from_system()
 
-## Emitted when the local player is eliminated in defend mode.
-signal defend_player_eliminated(wave_number: int)
+	func get_participant(player_id: String) -> Participant:
+		return participants.get(player_id, null)
 
-## Emitted when a game session ends with the result.
-## result: {game_type, war_id, faction_id, points_earned, rank, personal_best}
-signal game_ended(result: Dictionary)
+	func add_faction_score(fid: String, delta: int) -> void:
+		faction_scores[fid] = int(faction_scores.get(fid, 0)) + delta
 
-## Emitted when war points are awarded and forwarded to TerritoryWar.
-signal war_points_awarded(war_id: String, faction_id: String, points: int, game_type: String)
+	func to_dict(now: int) -> Dictionary:
+		var people: Array = []
+		for p in participants.values():
+			people.append((p as Participant).to_dict())
+		return {
+			"id": id,
+			"mode": mode,
+			"zone_id": zone_id,
+			"war_id": war_id,
+			"state": state,
+			"started_at": started_at,
+			"deadline_ts": deadline_ts,
+			"seconds_remaining": max(0, deadline_ts - now),
+			"participants": people,
+			"faction_scores": faction_scores.duplicate(),
+			"winner_faction_id": winner_faction_id,
+			"awarded_points": awarded_points,
+			"defend_current_wave": defend_current_wave,
+			"build_faction_progress": build_faction_progress.duplicate(),
+		}
 
-# ── State ─────────────────────────────────────────────────────────────────────
 
-## Current game session.
-var current_game_type: String  = ""
-var current_game_state: String = STATE_IDLE
-var current_war_id: String     = ""
-var current_faction_id: String = ""
-var current_zone_id: String    = ""
+# ---------------------------------------------------------------------------
+# Runtime state
+# ---------------------------------------------------------------------------
+var _matches: Dictionary = {}            # match_id -> MatchRecord
+var _player_to_match: Dictionary = {}    # player_id -> match_id
+var _next_match_index: int = 1
+var _tick_timer: Timer
+var _territory_war: Node = null
+var _faction_manager: Node = null
 
-## Race state.
-var _race_checkpoints: Array   = []  # [{position: Vector3, hit: bool}]
-var _race_checkpoints_hit: int = 0
-var _race_time_elapsed: float  = 0.0
-var _race_finished: bool       = false
 
-## Build state.
-var _build_target_tier: int   = 1
-var _build_blocks_placed: int = 0
-var _build_time_elapsed: float = 0.0
-var _build_required_blocks: int = 1
-
-## Defend state.
-var _defend_current_wave: int   = 0
-var _defend_npcs_alive: int     = 0
-var _defend_wave_timer: float   = 0.0
-var _defend_player_alive: bool  = true
-var _defend_waves_cleared: int  = 0
-
-## Shared timer.
-var _game_timer: float = 0.0
-var _game_time_limit: float = 0.0
-
-## Personal-best records. {game_type: {points, time}}
-var personal_bests: Dictionary = {}
-
-## Leaderboard for current session. [{player_id, player_name, points, finish_time}]
-var session_leaderboard: Array = []
-
-## Socket reference.
-var _socket: Node = null
-
-# ── Lifecycle ─────────────────────────────────────────────────────────────────
-
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
 func _ready() -> void:
-	_resolve_socket()
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	_tick_timer = Timer.new()
+	_tick_timer.wait_time = 1.0
+	_tick_timer.autostart = true
+	add_child(_tick_timer)
+	_tick_timer.timeout.connect(_on_tick)
+	_territory_war = _resolve_singleton("TerritoryWar")
+	_faction_manager = _resolve_singleton("FactionManager")
 	print("[MiniGameSystem] Ready.")
 
-func _process(delta: float) -> void:
-	if current_game_state != STATE_RUNNING:
-		return
-	match current_game_type:
-		GAME_RACE:   _process_race(delta)
-		GAME_BUILD:  _process_build(delta)
-		GAME_DEFEND: _process_defend(delta)
 
-# ── Socket helpers ─────────────────────────────────────────────────────────────
+func _resolve_singleton(node_name: String) -> Node:
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return null
+	var root: Node = tree.root
+	if root != null and root.has_node(node_name):
+		return root.get_node(node_name)
+	return null
 
-func _resolve_socket() -> void:
-	_socket = get_node_or_null("/root/SocketIOClient")
-	if _socket == null:
-		get_tree().create_timer(1.0).timeout.connect(_resolve_socket)
-		return
-	_socket.on_event("minigame_start",     _on_server_game_start)
-	_socket.on_event("minigame_result",    _on_server_game_result)
-	_socket.on_event("minigame_leaderboard", _on_server_leaderboard)
-	_socket.on_event("defend_npc_spawn",   _on_defend_npc_spawn)
-	print("[MiniGameSystem] Socket events registered.")
 
-func _emit(event: String, payload: Dictionary) -> void:
-	if _socket == null:
-		push_warning("[MiniGameSystem] Cannot emit '%s' — socket unavailable." % event)
-		return
-	_socket.send_event(event, payload)
+# ---------------------------------------------------------------------------
+# Creation / joining
+# ---------------------------------------------------------------------------
+func create_match(mode: int, zone_id: String, config: Dictionary = {}) -> Dictionary:
+	# Mini-games can only be played in zones with an active war.
+	if not _zone_has_active_war(zone_id):
+		return _res("NO_ACTIVE_WAR", "Mini-games require an active war in the zone.")
 
-# ── Public API: Session management ────────────────────────────────────────────
+	var m: MatchRecord = MatchRecord.new(_generate_match_id(), mode, zone_id)
+	m.config = config.duplicate(true)
+	m.war_id = _get_zone_war_id(zone_id)
 
-## Attempt to start a mini-game.  Fails if no active war in the zone.
-func start_game(game_type: String, war_id: String, faction_id: String, zone_id: String) -> bool:
-	if current_game_state != STATE_IDLE:
-		push_warning("[MiniGameSystem] A game is already in progress.")
+	match mode:
+		GameMode.RACE:
+			m.duration_seconds = int(config.get("duration", RACE_DEFAULT_DURATION))
+			m.checkpoint_count = max(3, int(config.get("checkpoints", 8)))
+		GameMode.BUILD:
+			m.duration_seconds = int(config.get("duration", BUILD_DEFAULT_DURATION))
+			m.build_total_steps = max(3, int(config.get("steps", 10)))
+		GameMode.DEFEND:
+			m.duration_seconds = int(config.get("duration", DEFEND_DEFAULT_DURATION))
+		_:
+			return _res("INVALID_MODE", "Unknown mini-game mode.")
+
+	m.duration_seconds = clamp(m.duration_seconds, 60, DEFEND_DEFAULT_DURATION * 2)
+	_matches[m.id] = m
+	m.log.append(_evt("created", {"mode": mode, "zone_id": zone_id}))
+	emit_signal("match_created", m.id, mode, zone_id)
+	return {"code": "OK", "match_id": m.id}
+
+
+func join_match(match_id: String, player_id: String, display_name: String, faction_id: String) -> int:
+	var m: MatchRecord = _matches.get(match_id, null)
+	if m == null:
+		return JoinResult.MATCH_NOT_FOUND
+	if _player_to_match.has(player_id):
+		return JoinResult.ALREADY_IN_MATCH
+	if m.participants.size() >= MAX_PARTICIPANTS_PER_MATCH:
+		return JoinResult.MATCH_FULL
+	if faction_id.is_empty():
+		return JoinResult.NOT_IN_FACTION
+	if m.state not in [MatchState.LOBBY, MatchState.COUNTDOWN]:
+		return JoinResult.MATCH_FULL
+
+	# Ensure participants come from factions actively at war in this zone.
+	if _territory_war != null and m.war_id != "":
+		var war = _territory_war.get_war(m.war_id) if _territory_war.has_method("get_war") else null
+		if war != null and faction_id != war.attacker_id and faction_id != war.defender_id:
+			return JoinResult.WRONG_FACTION
+
+	var p: Participant = Participant.new(player_id, display_name, faction_id)
+	m.participants[player_id] = p
+	_player_to_match[player_id] = match_id
+	m.log.append(_evt("joined", {"player_id": player_id, "faction_id": faction_id}))
+	emit_signal("player_joined", match_id, player_id, faction_id)
+	_maybe_start_countdown(m)
+	return JoinResult.OK
+
+
+func leave_match(player_id: String) -> bool:
+	var match_id: String = _player_to_match.get(player_id, "")
+	if match_id.is_empty():
 		return false
-	var tw: Node = get_node_or_null("/root/TerritoryWar")
-	if tw == null:
-		push_warning("[MiniGameSystem] TerritoryWar not found.")
+	var m: MatchRecord = _matches.get(match_id, null)
+	if m == null:
+		_player_to_match.erase(player_id)
 		return false
-	var war: Dictionary = tw.active_wars.get(war_id, {})
-	if war.get("status", "") != "active":
-		push_warning("[MiniGameSystem] No active war for war_id: %s" % war_id)
-		return false
-
-	current_game_type  = game_type
-	current_war_id     = war_id
-	current_faction_id = faction_id
-	current_zone_id    = zone_id
-	current_game_state = STATE_COUNTDOWN
-	session_leaderboard.clear()
-
-	_emit("minigame_join", {
-		"game_type":  game_type,
-		"war_id":     war_id,
-		"faction_id": faction_id,
-		"zone_id":    zone_id
-	})
-	# Server will echo back a "minigame_start" when all players are ready.
+	m.participants.erase(player_id)
+	_player_to_match.erase(player_id)
+	m.log.append(_evt("left", {"player_id": player_id}))
+	emit_signal("player_left", match_id, player_id)
+	if m.state == MatchState.RUNNING and m.participants.is_empty():
+		_abort_match(m, "no_participants")
 	return true
 
-## Abort the current game (forfeits points).
-func abort_game() -> void:
-	if current_game_state == STATE_IDLE:
+
+func start_match_now(match_id: String) -> bool:
+	# Manual start hook — normally the countdown triggers this automatically.
+	var m: MatchRecord = _matches.get(match_id, null)
+	if m == null:
+		return false
+	if m.state != MatchState.LOBBY and m.state != MatchState.COUNTDOWN:
+		return false
+	if m.participants.size() < MIN_PARTICIPANTS_TO_START:
+		return false
+	_begin_running(m)
+	return true
+
+
+# ---------------------------------------------------------------------------
+# RACE API
+# ---------------------------------------------------------------------------
+func race_checkpoint(match_id: String, player_id: String, checkpoint_index: int) -> bool:
+	var m: MatchRecord = _require_running(match_id, GameMode.RACE)
+	if m == null:
+		return false
+	var p: Participant = m.get_participant(player_id)
+	if p == null:
+		return false
+	if checkpoint_index < 0 or checkpoint_index >= m.checkpoint_count:
+		return false
+	if checkpoint_index != p.checkpoints_hit:
+		# Must hit checkpoints in order.
+		return false
+	p.checkpoints_hit += 1
+	p.score += RACE_CHECKPOINT_POINTS
+	m.add_faction_score(p.faction_id, RACE_CHECKPOINT_POINTS)
+	emit_signal("checkpoint_reached", match_id, player_id, checkpoint_index)
+	if p.checkpoints_hit >= m.checkpoint_count:
+		# Player has finished — award a position bonus.
+		var finished: int = 0
+		for q in m.participants.values():
+			if (q as Participant).finish_position > 0:
+				finished += 1
+		p.finish_position = finished + 1
+		p.finish_time_ms = int((Time.get_unix_time_from_system() - m.started_at) * 1000)
+		var bonus: int = max(0, (MAX_PARTICIPANTS_PER_MATCH - p.finish_position)) * 15
+		p.score += bonus
+		m.add_faction_score(p.faction_id, bonus)
+		# Finish the match as soon as someone completes it and the rest have
+		# had the duration to react — or immediately if everyone has finished.
+		if _all_racers_finished(m):
+			_complete_match(m)
+	return true
+
+
+func _all_racers_finished(m: MatchRecord) -> bool:
+	for p in m.participants.values():
+		if (p as Participant).finish_position <= 0:
+			return false
+	return true
+
+
+# ---------------------------------------------------------------------------
+# BUILD API
+# ---------------------------------------------------------------------------
+func build_step(match_id: String, player_id: String) -> bool:
+	var m: MatchRecord = _require_running(match_id, GameMode.BUILD)
+	if m == null:
+		return false
+	var p: Participant = m.get_participant(player_id)
+	if p == null:
+		return false
+	p.build_steps_done += 1
+	p.score += BUILD_STEP_POINTS
+	m.add_faction_score(p.faction_id, BUILD_STEP_POINTS)
+	var faction_total: int = int(m.build_faction_progress.get(p.faction_id, 0)) + 1
+	m.build_faction_progress[p.faction_id] = faction_total
+	emit_signal("build_step_completed", match_id, player_id, faction_total)
+	if faction_total >= m.build_total_steps:
+		_complete_match(m)
+	return true
+
+
+# ---------------------------------------------------------------------------
+# DEFEND API
+# ---------------------------------------------------------------------------
+func defend_wave_cleared(match_id: String, faction_id: String) -> bool:
+	var m: MatchRecord = _require_running(match_id, GameMode.DEFEND)
+	if m == null:
+		return false
+	m.defend_current_wave += 1
+	m.add_faction_score(faction_id, DEFEND_WAVE_POINTS)
+	emit_signal("wave_survived", match_id, m.defend_current_wave, faction_id)
+	return true
+
+
+func defend_damage(match_id: String, player_id: String, amount: int) -> void:
+	var m: MatchRecord = _require_running(match_id, GameMode.DEFEND)
+	if m == null:
 		return
-	_emit("minigame_abort", {
-		"game_type": current_game_type,
-		"war_id":    current_war_id
-	})
-	_reset_state()
-
-# ── Public API: Race ──────────────────────────────────────────────────────────
-
-## Called by the player controller or trigger zone when a checkpoint is entered.
-func hit_checkpoint(checkpoint_index: int) -> void:
-	if current_game_type != GAME_RACE or current_game_state != STATE_RUNNING:
+	var p: Participant = m.get_participant(player_id)
+	if p == null:
 		return
-	if checkpoint_index >= _race_checkpoints.size():
+	p.damage_dealt += max(0, amount)
+	# Every 100 damage = 1 point, capped to avoid snowballing.
+	var bonus: int = min(30, int(floor(amount / 100.0)))
+	if bonus > 0:
+		p.score += bonus
+		m.add_faction_score(p.faction_id, bonus)
+
+
+func defend_player_down(match_id: String, player_id: String) -> void:
+	var m: MatchRecord = _require_running(match_id, GameMode.DEFEND)
+	if m == null:
 		return
-	var cp: Dictionary = _race_checkpoints[checkpoint_index]
-	if cp.get("hit", false):
-		return  # Already counted.
-	_race_checkpoints[checkpoint_index]["hit"] = true
-	_race_checkpoints_hit += 1
-	emit_signal("checkpoint_hit", _race_checkpoints_hit, _race_checkpoints.size())
-	_emit("minigame_checkpoint", {
-		"war_id":           current_war_id,
-		"checkpoint_index": checkpoint_index
-	})
-	# Last checkpoint = finish line.
-	if _race_checkpoints_hit >= _race_checkpoints.size():
-		_finish_race()
+	var p: Participant = m.get_participant(player_id)
+	if p != null:
+		p.is_alive = false
+	if _all_defenders_dead(m):
+		_complete_match(m)
 
-# ── Public API: Build ──────────────────────────────────────────────────────────
 
-## Called by the building system when a block is placed during a build game.
-func register_block_placed() -> void:
-	if current_game_type != GAME_BUILD or current_game_state != STATE_RUNNING:
+func _all_defenders_dead(m: MatchRecord) -> bool:
+	for p in m.participants.values():
+		if (p as Participant).is_alive:
+			return false
+	return true
+
+
+# ---------------------------------------------------------------------------
+# Tick / lifecycle
+# ---------------------------------------------------------------------------
+func _on_tick() -> void:
+	var now: int = Time.get_unix_time_from_system()
+	var expiring: Array = []
+	for m in _matches.values():
+		var rec: MatchRecord = m
+		match rec.state:
+			MatchState.COUNTDOWN:
+				if now >= rec.deadline_ts:
+					_begin_running(rec)
+			MatchState.RUNNING:
+				emit_signal("match_tick", rec.id, rec.to_dict(now))
+				if now >= rec.deadline_ts:
+					_complete_match(rec)
+			MatchState.COMPLETED, MatchState.ABORTED:
+				if now - rec.started_at > 60 * 30: # keep 30 min for UI
+					expiring.append(rec.id)
+			_:
+				pass
+	for id in expiring:
+		_matches.erase(id)
+
+
+func _maybe_start_countdown(m: MatchRecord) -> void:
+	if m.state != MatchState.LOBBY:
 		return
-	_build_blocks_placed += 1
-	_emit("minigame_block_placed", {
-		"war_id":        current_war_id,
-		"blocks_placed": _build_blocks_placed
-	})
-	if _build_blocks_placed >= _build_required_blocks:
-		_finish_build()
-
-# ── Public API: Defend ────────────────────────────────────────────────────────
-
-## Called by the NPC/combat system when the player takes lethal damage.
-func notify_player_eliminated() -> void:
-	if current_game_type != GAME_DEFEND or current_game_state != STATE_RUNNING:
+	if m.participants.size() < MIN_PARTICIPANTS_TO_START:
 		return
-	_defend_player_alive = false
-	emit_signal("defend_player_eliminated", _defend_current_wave)
-	_finish_defend(false)
+	m.state = MatchState.COUNTDOWN
+	m.deadline_ts = Time.get_unix_time_from_system() + COUNTDOWN_SECONDS
+	m.log.append(_evt("countdown_started", {}))
 
-## Called by combat system when an NPC in the defend game is killed.
-func notify_npc_killed() -> void:
-	if current_game_type != GAME_DEFEND or current_game_state != STATE_RUNNING:
+
+func _begin_running(m: MatchRecord) -> void:
+	m.state = MatchState.RUNNING
+	m.started_at = Time.get_unix_time_from_system()
+	m.deadline_ts = m.started_at + m.duration_seconds
+	m.log.append(_evt("running", {}))
+	emit_signal("match_started", m.id)
+
+
+func _complete_match(m: MatchRecord) -> void:
+	if m.state != MatchState.RUNNING:
 		return
-	_defend_npcs_alive = max(0, _defend_npcs_alive - 1)
-	if _defend_npcs_alive == 0:
-		_clear_defend_wave()
+	m.state = MatchState.COMPLETED
+	m.winner_faction_id = _decide_winner(m)
+	m.awarded_points = _compute_award(m)
+	m.log.append(_evt("completed", {
+		"winner_faction_id": m.winner_faction_id,
+		"awarded_points": m.awarded_points,
+	}))
+	_distribute_rewards(m)
+	# Detach players.
+	for pid in m.participants.keys():
+		_player_to_match.erase(pid)
+	emit_signal("match_completed", m.id, m.winner_faction_id, m.awarded_points)
 
-# ── Public API: Queries ────────────────────────────────────────────────────────
 
-## Returns true if a game is currently running.
-func is_game_active() -> bool:
-	return current_game_state == STATE_RUNNING or current_game_state == STATE_COUNTDOWN
+func _abort_match(m: MatchRecord, reason: String) -> void:
+	m.state = MatchState.ABORTED
+	m.log.append(_evt("aborted", {"reason": reason}))
+	for pid in m.participants.keys():
+		_player_to_match.erase(pid)
+	emit_signal("match_aborted", m.id, reason)
 
-## Returns seconds remaining in the current game (client estimate).
-func time_remaining() -> float:
-	return max(0.0, _game_time_limit - _game_timer)
 
-## Returns the personal-best point total for a given game type.
-func get_personal_best(game_type: String) -> int:
-	return personal_bests.get(game_type, {}).get("points", 0)
+# ---------------------------------------------------------------------------
+# Scoring / rewards
+# ---------------------------------------------------------------------------
+func _decide_winner(m: MatchRecord) -> String:
+	var best_id: String = ""
+	var best_score: int = -1
+	for fid in m.faction_scores.keys():
+		var s: int = int(m.faction_scores[fid])
+		if s > best_score:
+			best_score = s
+			best_id = fid
+		elif s == best_score and best_id != "":
+			# Tie-breaker: prefer the faction with the most participants still alive.
+			var alive_best: int = _count_alive(m, best_id)
+			var alive_new: int = _count_alive(m, fid)
+			if alive_new > alive_best:
+				best_id = fid
+	return best_id
 
-# ── Game initialization ────────────────────────────────────────────────────────
 
-func _init_race(data: Dictionary) -> void:
-	_race_checkpoints.clear()
-	_race_checkpoints_hit = 0
-	_race_time_elapsed    = 0.0
-	_race_finished        = false
-	var raw_cps: Array = data.get("checkpoints", [])
-	for cp_data in raw_cps:
-		_race_checkpoints.append({
-			"position": Vector3(
-				float(cp_data.get("x", 0)),
-				float(cp_data.get("y", 0)),
-				float(cp_data.get("z", 0))
-			),
-			"hit": false
-		})
-	_game_time_limit = float(data.get("time_limit", RACE_TIME_LIMIT_SECS))
+func _count_alive(m: MatchRecord, faction_id: String) -> int:
+	var c: int = 0
+	for p in m.participants.values():
+		var pa: Participant = p
+		if pa.faction_id == faction_id and pa.is_alive:
+			c += 1
+	return c
 
-func _init_build(data: Dictionary) -> void:
-	_build_time_elapsed     = 0.0
-	_build_blocks_placed    = 0
-	_build_target_tier      = int(data.get("tier", 1))
-	_build_required_blocks  = _blocks_for_tier(_build_target_tier)
-	_game_time_limit        = float(data.get("time_limit", BUILD_TIME_LIMIT_SECS))
 
-func _init_defend(data: Dictionary) -> void:
-	_defend_current_wave  = 0
-	_defend_waves_cleared = 0
-	_defend_player_alive  = true
-	_defend_npcs_alive    = 0
-	_defend_wave_timer    = 0.0
-	_game_time_limit      = DEFEND_MAX_WAVES * DEFEND_WAVE_DURATION_SECS
-	_start_defend_wave()
+func _compute_award(m: MatchRecord) -> int:
+	# Map the winning faction's score onto the [MIN_POINTS, MAX_POINTS] range.
+	if m.winner_faction_id.is_empty():
+		return 0
+	var max_score: int = 0
+	for fid in m.faction_scores.keys():
+		max_score = max(max_score, int(m.faction_scores[fid]))
+	if max_score <= 0:
+		return MIN_POINTS
+	var winner_score: int = int(m.faction_scores[m.winner_faction_id])
+	var ratio: float = float(winner_score) / float(max_score)
+	# Mini bonus based on mode & completion level.
+	var completion: float = _completion_factor(m)
+	var normalised: float = clamp(ratio * completion, 0.2, 1.0)
+	var awarded: int = int(round(lerp(float(MIN_POINTS), float(MAX_POINTS), normalised)))
+	return clamp(awarded, MIN_POINTS, MAX_POINTS)
 
-# ── Race processing ────────────────────────────────────────────────────────────
 
-func _process_race(delta: float) -> void:
-	_game_timer        += delta
-	_race_time_elapsed += delta
-	var remaining: float = max(0.0, _game_time_limit - _game_timer)
-	emit_signal("game_tick", GAME_RACE, remaining)
-	if remaining <= 0.0 and not _race_finished:
-		_finish_race()
+func _completion_factor(m: MatchRecord) -> float:
+	match m.mode:
+		GameMode.RACE:
+			var finished: int = 0
+			for p in m.participants.values():
+				if (p as Participant).finish_position > 0:
+					finished += 1
+			if m.participants.is_empty():
+				return 0.5
+			return clamp(float(finished) / float(m.participants.size()), 0.3, 1.0)
+		GameMode.BUILD:
+			if m.build_total_steps <= 0:
+				return 0.5
+			var best_progress: int = 0
+			for fid in m.build_faction_progress.keys():
+				best_progress = max(best_progress, int(m.build_faction_progress[fid]))
+			return clamp(float(best_progress) / float(m.build_total_steps), 0.3, 1.0)
+		GameMode.DEFEND:
+			# Deeper waves = larger payout.
+			return clamp(0.3 + 0.1 * float(m.defend_current_wave), 0.3, 1.0)
+	return 0.5
 
-func _finish_race() -> void:
-	if _race_finished:
+
+func _distribute_rewards(m: MatchRecord) -> void:
+	if m.winner_faction_id.is_empty() or m.awarded_points <= 0:
 		return
-	_race_finished = true
-	var completion_ratio: float = float(_race_checkpoints_hit) / max(1, _race_checkpoints.size())
-	var time_bonus: float       = max(0.0, 1.0 - (_race_time_elapsed / _game_time_limit))
-	var raw_points: float       = (float(WAR_POINTS_MAX) * completion_ratio) * (0.5 + 0.5 * time_bonus)
-	raw_points += float(_race_checkpoints_hit * RACE_POINTS_PER_CHECKPOINT)
-	var points: int = clamp(int(raw_points), WAR_POINTS_MIN if completion_ratio > 0.0 else 0, WAR_POINTS_MAX)
-	_submit_result(points, _race_time_elapsed)
+	if _territory_war != null and _territory_war.has_method("register_mini_game_victory"):
+		_territory_war.register_mini_game_victory(
+			m.winner_faction_id,
+			m.zone_id,
+			max(1, int(round(m.awarded_points / 100.0))),
+		)
+	if _faction_manager != null:
+		if _faction_manager.has_method("award_war_points"):
+			_faction_manager.award_war_points(m.winner_faction_id, m.awarded_points)
+		if _faction_manager.has_method("register_mini_game_win"):
+			_faction_manager.register_mini_game_win(m.winner_faction_id)
 
-# ── Build processing ───────────────────────────────────────────────────────────
 
-func _process_build(delta: float) -> void:
-	_game_timer         += delta
-	_build_time_elapsed += delta
-	var remaining: float = max(0.0, _game_time_limit - _game_timer)
-	emit_signal("game_tick", GAME_BUILD, remaining)
-	if remaining <= 0.0:
-		_finish_build()
+# ---------------------------------------------------------------------------
+# Queries
+# ---------------------------------------------------------------------------
+func get_match(match_id: String) -> MatchRecord:
+	return _matches.get(match_id, null)
 
-func _finish_build() -> void:
-	current_game_state = STATE_FINISHED
-	var completion: bool   = _build_blocks_placed >= _build_required_blocks
-	var base_pts: int      = BUILD_TIER_POINTS.get(_build_target_tier, WAR_POINTS_MIN)
-	var time_ratio: float  = max(0.0, 1.0 - (_build_time_elapsed / _game_time_limit))
-	var points: int        = int(float(base_pts) * (0.6 + 0.4 * time_ratio)) if completion else WAR_POINTS_MIN / 2
-	emit_signal("build_completed", _build_target_tier, _build_time_elapsed)
-	_submit_result(points, _build_time_elapsed)
 
-# ── Defend processing ──────────────────────────────────────────────────────────
+func get_match_for_player(player_id: String) -> MatchRecord:
+	var mid: String = _player_to_match.get(player_id, "")
+	if mid.is_empty():
+		return null
+	return _matches.get(mid, null)
 
-func _process_defend(delta: float) -> void:
-	_game_timer       += delta
-	_defend_wave_timer += delta
-	var remaining: float = max(0.0, DEFEND_WAVE_DURATION_SECS - _defend_wave_timer)
-	emit_signal("game_tick", GAME_DEFEND, remaining)
-	if _defend_wave_timer >= DEFEND_WAVE_DURATION_SECS and _defend_npcs_alive > 0:
-		# Time ran out on this wave — wave failed.
-		_finish_defend(false)
 
-func _start_defend_wave() -> void:
-	_defend_current_wave += 1
-	if _defend_current_wave > DEFEND_MAX_WAVES:
-		_finish_defend(true)
+func list_active_matches() -> Array:
+	var out: Array = []
+	for m in _matches.values():
+		if (m as MatchRecord).state in [MatchState.LOBBY, MatchState.COUNTDOWN, MatchState.RUNNING]:
+			out.append(m)
+	return out
+
+
+func list_matches_in_zone(zone_id: String) -> Array:
+	var out: Array = []
+	for m in _matches.values():
+		if (m as MatchRecord).zone_id == zone_id:
+			out.append(m)
+	return out
+
+
+func get_leaderboard(match_id: String) -> Array:
+	var m: MatchRecord = _matches.get(match_id, null)
+	if m == null:
+		return []
+	var rows: Array = []
+	for p in m.participants.values():
+		rows.append((p as Participant).to_dict())
+	rows.sort_custom(func(a, b): return a.score > b.score)
+	return rows
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+func _require_running(match_id: String, expected_mode: int) -> MatchRecord:
+	var m: MatchRecord = _matches.get(match_id, null)
+	if m == null:
+		return null
+	if m.mode != expected_mode:
+		push_warning("[MiniGameSystem] Mode mismatch for match %s" % match_id)
+		return null
+	if m.state != MatchState.RUNNING:
+		return null
+	return m
+
+
+func _zone_has_active_war(zone_id: String) -> bool:
+	if _territory_war == null:
+		return true # offline fallback — allow testing without a war
+	if _territory_war.has_method("get_active_war_in_zone"):
+		var w = _territory_war.get_active_war_in_zone(zone_id)
+		return w != null
+	return false
+
+
+func _get_zone_war_id(zone_id: String) -> String:
+	if _territory_war == null or not _territory_war.has_method("get_active_war_in_zone"):
+		return ""
+	var w = _territory_war.get_active_war_in_zone(zone_id)
+	if w == null:
+		return ""
+	return w.id
+
+
+func _generate_match_id() -> String:
+	var idx: int = _next_match_index
+	_next_match_index += 1
+	return "MG-%06d" % idx
+
+
+func _evt(type: String, payload: Dictionary) -> Dictionary:
+	return {"type": type, "ts": Time.get_unix_time_from_system(), "payload": payload}
+
+
+func _res(code: String, message: String) -> Dictionary:
+	return {"code": code, "message": message}
+
+
+# ---------------------------------------------------------------------------
+# Debug helpers
+# ---------------------------------------------------------------------------
+func debug_state() -> Dictionary:
+	var now: int = Time.get_unix_time_from_system()
+	var matches_out: Array = []
+	for m in _matches.values():
+		matches_out.append((m as MatchRecord).to_dict(now))
+	return {"matches": matches_out}
+
+
+func debug_force_complete(match_id: String, winner_faction_id: String) -> void:
+	var m: MatchRecord = _matches.get(match_id, null)
+	if m == null:
 		return
-	_defend_wave_timer = 0.0
-	var npc_count: int = DEFEND_BASE_NPCS + (_defend_current_wave - 1) * DEFEND_NPC_SCALE
-	_defend_npcs_alive = npc_count
-	emit_signal("defend_wave_started", _defend_current_wave, npc_count)
-	_emit("minigame_wave_start", {
-		"war_id":     current_war_id,
-		"wave":       _defend_current_wave,
-		"npc_count":  npc_count
-	})
-
-func _clear_defend_wave() -> void:
-	_defend_waves_cleared += 1
-	emit_signal("defend_wave_cleared", _defend_current_wave, 1)
-	_emit("minigame_wave_cleared", {
-		"war_id": current_war_id,
-		"wave":   _defend_current_wave
-	})
-	if _defend_current_wave < DEFEND_MAX_WAVES:
-		_start_defend_wave()
-	else:
-		_finish_defend(true)
-
-func _finish_defend(survived: bool) -> void:
-	current_game_state = STATE_FINISHED
-	var wave_ratio: float = float(_defend_waves_cleared) / float(DEFEND_MAX_WAVES)
-	var points: int = clamp(
-		int(float(WAR_POINTS_MAX) * wave_ratio),
-		WAR_POINTS_MIN if _defend_waves_cleared > 0 else 0,
-		WAR_POINTS_MAX
-	)
-	if survived:
-		points = WAR_POINTS_MAX
-	_submit_result(points, _game_timer)
-
-# ── Result submission ──────────────────────────────────────────────────────────
-
-func _submit_result(points: int, time_taken: float) -> void:
-	current_game_state = STATE_FINISHED
-	_update_personal_best(current_game_type, points, time_taken)
-	var result: Dictionary = {
-		"game_type":    current_game_type,
-		"war_id":       current_war_id,
-		"faction_id":   current_faction_id,
-		"zone_id":      current_zone_id,
-		"points_earned": points,
-		"time_taken":   time_taken,
-		"personal_best": get_personal_best(current_game_type)
-	}
-	emit_signal("game_ended", result)
-	# Report to TerritoryWar for activity score.
-	if points > 0:
-		var tw: Node = get_node_or_null("/root/TerritoryWar")
-		if tw != null and tw.has_method("report_activity"):
-			tw.report_activity(current_war_id, current_faction_id, "mini_game_win", 1)
-		emit_signal("war_points_awarded", current_war_id, current_faction_id, points, current_game_type)
-	_emit("minigame_result_submit", result)
-	# Defer state reset so UI can read the result.
-	get_tree().create_timer(1.0).timeout.connect(_reset_state)
-
-func _update_personal_best(game_type: String, points: int, time_taken: float) -> void:
-	var pb: Dictionary = personal_bests.get(game_type, {})
-	if points > pb.get("points", 0):
-		personal_bests[game_type] = {"points": points, "time": time_taken}
-
-func _reset_state() -> void:
-	current_game_type   = ""
-	current_game_state  = STATE_IDLE
-	current_war_id      = ""
-	current_faction_id  = ""
-	current_zone_id     = ""
-	_game_timer         = 0.0
-	_game_time_limit    = 0.0
-	_race_checkpoints.clear()
-	_race_checkpoints_hit  = 0
-	_race_finished         = false
-	_build_blocks_placed   = 0
-	_build_target_tier     = 1
-	_defend_current_wave   = 0
-	_defend_waves_cleared  = 0
-	_defend_npcs_alive     = 0
-	_defend_player_alive   = true
-
-# ── Socket event handlers ──────────────────────────────────────────────────────
-
-func _on_server_game_start(data: Dictionary) -> void:
-	var game_type: String = data.get("game_type", "")
-	var war_id: String    = data.get("war_id", "")
-	if game_type == "" or war_id != current_war_id:
-		return
-	current_game_state = STATE_RUNNING
-	_game_timer        = 0.0
-	match game_type:
-		GAME_RACE:   _init_race(data)
-		GAME_BUILD:  _init_build(data)
-		GAME_DEFEND: _init_defend(data)
-		_:
-			push_warning("[MiniGameSystem] Unknown game type: %s" % game_type)
-			return
-	emit_signal("game_started", game_type, war_id)
-	print("[MiniGameSystem] Game started: %s (war %s)" % [game_type, war_id])
-
-func _on_server_game_result(data: Dictionary) -> void:
-	## Server may push authoritative results that override local calculation.
-	var war_id: String = data.get("war_id", "")
-	if war_id != current_war_id:
-		return
-	var points: int = int(data.get("points_earned", 0))
-	var result: Dictionary = {
-		"game_type":     data.get("game_type", current_game_type),
-		"war_id":        war_id,
-		"faction_id":    current_faction_id,
-		"points_earned": points,
-		"time_taken":    float(data.get("time_taken", 0.0)),
-		"rank":          int(data.get("rank", 0)),
-		"personal_best": get_personal_best(current_game_type)
-	}
-	emit_signal("game_ended", result)
-	if points > 0:
-		emit_signal("war_points_awarded", war_id, current_faction_id, points, result["game_type"])
-
-func _on_server_leaderboard(data: Dictionary) -> void:
-	var war_id: String = data.get("war_id", "")
-	if war_id != current_war_id:
-		return
-	session_leaderboard = data.get("entries", [])
-
-func _on_defend_npc_spawn(data: Dictionary) -> void:
-	var war_id: String = data.get("war_id", "")
-	if war_id != current_war_id or current_game_type != GAME_DEFEND:
-		return
-	_defend_npcs_alive += int(data.get("count", 1))
-
-# ── Utility ────────────────────────────────────────────────────────────────────
-
-func _blocks_for_tier(tier: int) -> int:
-	match tier:
-		1: return 1
-		2: return 3
-		3: return 6
-		4: return 10
-		_: return 1
+	if m.state != MatchState.RUNNING:
+		_begin_running(m)
+	m.add_faction_score(winner_faction_id, 9999)
+	_complete_match(m)
