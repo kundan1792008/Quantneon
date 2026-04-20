@@ -12,6 +12,7 @@ const COMMUNICATION_WEIGHT: float = 0.20
 const MIN_DECAY_SUM_THRESHOLD: float = 0.0001
 const MUTUAL_INTERACTION_BONUS_INCREMENT: float = 0.03
 const MAX_MUTUAL_MULTIPLIER: float = 1.25
+const MAX_EVENT_PARTICIPANTS_FOR_PAIRWISE: int = 64
 
 var _interactions: Dictionary = {}
 var _resonance_cache: Dictionary = {}
@@ -40,8 +41,9 @@ func record_shared_event_participation(user_ids: Array, event_weight: float = 1.
         return
     var ts: int = timestamp if timestamp >= 0 else Time.get_unix_time_from_system()
     var clean_weight: float = clampf(event_weight, 0.0, 1.0)
-    for i in range(user_ids.size()):
-        for j in range(i + 1, user_ids.size()):
+    var participant_count: int = min(user_ids.size(), MAX_EVENT_PARTICIPANTS_FOR_PAIRWISE)
+    for i in range(participant_count):
+        for j in range(i + 1, participant_count):
             var uid: String = str(user_ids[i])
             var pid: String = str(user_ids[j])
             record_interaction(uid, pid, 0.5, clean_weight, 0.0, ts)

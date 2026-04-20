@@ -33,9 +33,9 @@ signal capacity_reached()
 var active_stream_id: String = ""
 var present_users: Dictionary = {} # { user_id: { display_name, avatar_node } }
 var _avatar_scene: PackedScene = null
-# Rolling social quality scoring service for this lobby session.
+# Rolling social quality scoring service for this lobby session (initialized in _setup_social_clustering()).
 var quality_scoring: QualityScoring = null
-# Dynamic router that assigns users to resonance-similar social instances.
+# Dynamic router that assigns users to resonance-similar social instances (initialized in _setup_social_clustering()).
 var instance_router: InstanceRouter = null
 var _instance_aura_cache: Dictionary = {}
 

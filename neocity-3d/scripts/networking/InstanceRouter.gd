@@ -26,6 +26,10 @@ var _instance_counter: int = 0
 
 
 func _ready() -> void:
+    if max_instance_size <= 0:
+        max_instance_size = 1
+    target_instance_size = clampi(target_instance_size, 1, max_instance_size)
+    min_instance_size = clampi(min_instance_size, 1, target_instance_size)
     if quality_scoring != null and not quality_scoring.resonance_updated.is_connected(_on_resonance_updated):
         quality_scoring.resonance_updated.connect(_on_resonance_updated)
 
@@ -131,7 +135,7 @@ func _select_instance_for_band(band: String, score: float) -> String:
             continue
         var center: float = float(entry.get("resonance_center", 0.0))
         var gap: float = absf(center - score)
-        if users.size() >= target_instance_size:
+        if users.size() > target_instance_size:
             gap += OVER_TARGET_SIZE_PENALTY
         if gap < best_gap:
             best_gap = gap
