@@ -8,6 +8,8 @@ extends ARVRBase
 
 const QualityScoringScript = preload("res://scripts/social/QualityScoring.gd")
 const InstanceRouterScript = preload("res://scripts/networking/InstanceRouter.gd")
+const BACKGROUND_CUE_INFLUENCE: float = 0.25
+const AMBIENT_CUE_INFLUENCE: float = 0.35
 
 # ─── Signals ──────────────────────────────────────────────────────────────────
 signal user_joined(user_id: String, display_name: String)
@@ -227,6 +229,6 @@ func _apply_resonance_ambience() -> void:
 
 	var cue_color: Color = strongest_cue.get("aura_color", ambient_color)
 	var cue_intensity: float = clampf(float(strongest_cue.get("aura_intensity", 0.0)), 0.0, 1.0)
-	world_env.background_color = ambient_color.lerp(cue_color, cue_intensity * 0.25)
-	world_env.ambient_light_color = ambient_color.lerp(cue_color, cue_intensity * 0.35)
+	world_env.background_color = ambient_color.lerp(cue_color, cue_intensity * BACKGROUND_CUE_INFLUENCE)
+	world_env.ambient_light_color = ambient_color.lerp(cue_color, cue_intensity * AMBIENT_CUE_INFLUENCE)
 	world_env.ambient_light_energy = lerpf(0.5, 0.9, cue_intensity)

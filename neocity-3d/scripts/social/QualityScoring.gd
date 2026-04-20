@@ -10,6 +10,8 @@ const BASE_INTERACTION_WEIGHT: float = 0.55
 const SHARED_EVENT_WEIGHT: float = 0.25
 const COMMUNICATION_WEIGHT: float = 0.20
 const MIN_DECAY_SUM_THRESHOLD: float = 0.0001
+const MUTUAL_INTERACTION_BONUS_INCREMENT: float = 0.03
+const MAX_MUTUAL_MULTIPLIER: float = 1.25
 
 var _interactions: Dictionary = {}
 var _resonance_cache: Dictionary = {}
@@ -197,4 +199,8 @@ func _mutual_multiplier(user_id: String, peer_id: String) -> float:
     var interactions: int = int(_pair_mutual_counts.get(key, 0))
     if interactions <= 1:
         return 1.0
-    return clampf(1.0 + float(interactions - 1) * 0.03, 1.0, 1.25)
+    return clampf(
+        1.0 + float(interactions - 1) * MUTUAL_INTERACTION_BONUS_INCREMENT,
+        1.0,
+        MAX_MUTUAL_MULTIPLIER
+    )
